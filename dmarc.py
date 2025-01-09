@@ -1,4 +1,3 @@
-# main.py - DMARC Email Report Processing System
 # This script handles the automated retrieval and processing of DMARC reports from email
 
 # Standard library and third-party imports for core functionality
@@ -14,6 +13,13 @@ import xml.etree.ElementTree as ET  # For XML parsing
 from typing import Dict, Any, Optional  # Type hints
 from analyzer import DMARCAnalyzer, process_dmarc_report, save_combined_report  # Custom DMARC analysis
 import logging  # For application logging
+
+# TODO: write the functionality to email the reports to clients automatically
+
+# TODO: implement batch processing of DMARC reports.
+
+# TODO: perform a test on a lot of emails and make sure that 
+# system properly handle all edge cases and inconsistencies
 
 # Set up logging configuration
 # - Logs both to file and console
@@ -209,6 +215,7 @@ def connect_to_email() -> Optional[imaplib.IMAP4_SSL]:
         logging.error(f"Error connecting to email: {str(e)}", exc_info=True)
         return None
 
+# TODO: inspect this function to check if it meets the requirements
 def process_email_attachment(attachment_path: str, extracted_dir: str, analyzer: DMARCAnalyzer) -> None:
     """
     Process a single DMARC report attachment
@@ -239,6 +246,8 @@ def process_email_attachment(attachment_path: str, extracted_dir: str, analyzer:
         else:
             logging.error(f"Failed to extract or find XML from {attachment_path}")
 
+# TODO: this function has to have a lookup and date to know to know exactly where 
+# to stop processing emails - has to always process last X emails till Y date
 def get_last_n_emails(imap: imaplib.IMAP4_SSL, n: int) -> None:
     """
     Retrieve and process the most recent emails from inbox
@@ -336,6 +345,8 @@ def get_last_n_emails(imap: imaplib.IMAP4_SSL, n: int) -> None:
     logging.info("Saving combined report")
     save_combined_report(email_dir, dmarc_analyzer)
 
+# TODO: this should run routinely one time on Sunday (cron job?) and connect 
+# to the database which has configuration information
 # Main execution block
 if __name__ == "__main__":
     logging.info("=== Starting DMARC report processing ===")

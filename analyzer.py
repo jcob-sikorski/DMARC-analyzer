@@ -9,6 +9,36 @@ import os  # For file operations
 import json  # For JSON processing
 import traceback  # For detailed error tracking
 
+# TODO: check if everything in the produced report aligns exaclty with this report
+# TODO: check if Phishing/Spoofing Sources are mentioned
+# TODO: check if Forwarded Emails are mentioned
+# TODO: check if General Recommendations are mentioned
+
+# Email Security Report 
+# Total Emails Sent: 1,200 
+# Emails Forwarded: 114 
+# - Recognized Forwarders: 104 emails. 
+# - Suspicious Forwarders: 10 emails. 
+
+# Authentication Results: 
+# - Legitimate Systems: 
+# - Follow Up Boss: 500 emails 
+# - Mailchimp: 300 emails 
+
+# - Forwarded Emails: 
+# - 114 emails have been forwarded. No action required.
+# - 10 emails were forwarded via suspicious servers. Closer monitoring required. 
+
+# - Phishing Attempts: 
+# - 50 phishing emails pretending to come from your domain. Immediate action required. 
+
+# - Security Gateway: 
+# - 50 emails were scanned by spam filters. No further action needed. 
+
+Country Summary: 
+"During the week of Nov 1 - Nov 7, most of your emails originated from the United States, with additional traffic detected from Pakistan, Turkey, and India."
+
+# TODO: this should create a new log file for each run (with a date of each run)
 # Set up logging configuration
 # - Logs will be written to both a file and console
 # - Debug level enables detailed tracking
@@ -26,6 +56,8 @@ logger = logging.getLogger(__name__)
 # Dictionary mappings for categorizing different types of email servers
 # These help identify the source and legitimacy of emails
 
+# TODO: these dictionaries should be downloaded 
+# from the google sheets
 # Known legitimate email service providers
 LEGITIMATE_SERVERS = {
     'outlook.com': 'Microsoft 365',
@@ -62,6 +94,14 @@ SECURITY_GATEWAYS = {
     'cisco.com': 'Cisco Email Security',
     'sophos': 'Sophos Email'
 }
+
+# TODO: understand what this cache class does and what's the purpose of it in the first 
+# place -- if it's not important - delete it -- else add external memory to store 
+# the cache for each run of the script
+
+# TODO: check if Maintain a database for known IP-to-system mappings. 
+# Cache reverse DNS and geolocation results to reduce repeated lookups. 
+
 
 # Cache class to store DNS and geolocation lookups
 # This reduces API calls and improves performance
@@ -113,6 +153,11 @@ class Cache:
         self.cache[key] = value
         self.save()
 
+# TODO: check where this is done: Total emails sent, forwarded, and suspected phishing attempts.
+# Categorized results for legitimate systems, forwarded emails, 
+# and suspicious/phishing activity. Summary of countries emails originated from. 
+
+# TODO: check if this DMARC Analyzer is made exactly to the requirements in the Google Doc file
 # Main DMARC analysis class
 class DMARCAnalyzer:
     def __init__(self):
@@ -147,6 +192,8 @@ class DMARCAnalyzer:
         """Perform reverse DNS lookup for an IP address
         Uses cache to avoid redundant lookups"""
         logger.debug(f"Performing reverse DNS lookup for IP: {ip}")
+
+        # TODO: check if this is the correct way to perform DNS lookups
         cached_result = self.dns_cache.get(ip)
         if cached_result:
             logger.debug(f"DNS cache hit for {ip}: {cached_result}")
@@ -166,6 +213,11 @@ class DMARCAnalyzer:
         """Get geolocation information for an IP address
         Uses ipinfo.io API with caching"""
         logger.debug(f"Getting geolocation for IP: {ip}")
+
+        # TODO: check if this is the correct way to retrieve the country 
+        # associated with each IP using IP intelligence databases
+
+        # TODO: check if this is the correct way to identify IP address
         cached_result = self.geo_cache.get(ip)
         if cached_result:
             logger.debug(f"Geo cache hit for {ip}: {cached_result}")
@@ -197,8 +249,11 @@ class DMARCAnalyzer:
         """Categorize email sender based on hostname
         Returns tuple of (category, system_name)"""
         logger.debug(f"Categorizing sender - IP: {ip}, Hostname: {hostname}")
+
+        # TODO: check if this is the correct way to categorize IP addresses
         hostname_lower = hostname.lower()
         
+        # TODO: check if this is done: categorized authentication results: Output in Report, and logic, types:
         # Check against known server categories
         for category, domains in [
             ('legitimate', LEGITIMATE_SERVERS),
@@ -225,11 +280,19 @@ class DMARCAnalyzer:
         
         logger.info(f"Authentication results - DKIM: {dkim_result}, SPF: {spf_result}")
         
+        # TODO: this should be changed to the services from the Google Sheet
         # Special handling for known legitimate services
         if system_name in ['Microsoft 365', 'Google Workspace'] and spf_result == 'fail':
             logger.info(f"Special case: {system_name} with SPF fail -> forwarded")
             return 'forwarded'
         
+        # TODO: determine if this is correct way for SPF and DKIM Results: 
+        # Check whether each email passed or failed authentication. 
+
+        # TODO: check if this is the correct way to match IPs and hostnames to predefined lists:
+        # Legitimate, Forwarder, Phishing, Servers and Security Gateway
+
+        # TODO: check if this correct way to handle cases
         # Determine authentication status
         result = None
         if dkim_result == 'pass' and spf_result == 'pass':
@@ -244,6 +307,11 @@ class DMARCAnalyzer:
             result = 'security_scanned'
         else:
             result = 'potential_phishing'
+
+        # TODO: Alignment (Internally Processed): 
+        # Validate if SPF and DKIM align with the domain in the "From" header. 
+        # Use alignment data internally to categorize emails but exclude
+        # it from client-facing reports. 
         
         logger.info(f"Final authentication result: {result}")
         return result
@@ -271,11 +339,19 @@ class DMARCAnalyzer:
             logger.error(f"Error updating date range: {str(e)}")
             logger.debug(traceback.format_exc())
 
+    # TODO: understand what is the purpose of this function
+    # and why it's not used in the system and what replaces it
+
+    # TODO: where is that performed: include a summary of the 
+    # countries emails originated from at the end of the report
     def analyze_dmarc_report(self, report_data: Dict[str, Any]) -> None:
         """Main method to analyze a DMARC report
         Processes all records and updates combined results"""
         logger.info("\nStarting DMARC report analysis")
         logger.debug(f"Report data: {json.dumps(report_data, indent=2)}")
+
+        # TODO: check if this is done: week and country list are variable 
+        # parameters based on the DMARC dat
         
         try:
             # Update date range from report metadata
@@ -300,6 +376,8 @@ class DMARCAnalyzer:
                     logger.warning("Record missing source IP, skipping")
                     continue
                 
+                # TODO: ensure that this is correct way to check Email Volume:
+                # Total emails processed per sending system. 
                 logger.debug(f"\nProcessing record for IP: {ip}")
                 count = int(record.get('count', 0))
                 self.combined_results['total_emails'] += count
