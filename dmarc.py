@@ -1,18 +1,24 @@
-# main.py
-from dotenv import load_dotenv
-import os
-import imaplib
-import email
-from email.header import decode_header
-import datetime
-import gzip
-import zipfile
-import xml.etree.ElementTree as ET
-from typing import Dict, Any, Optional
-from analyzer import DMARCAnalyzer, process_dmarc_report, save_combined_report
-import logging
+# main.py - DMARC Email Report Processing System
+# This script handles the automated retrieval and processing of DMARC reports from email
 
-# Configure logging
+# Standard library and third-party imports for core functionality
+from dotenv import load_dotenv  # For loading environment variables
+import os  # For file and directory operations
+import imaplib  # For IMAP email access
+import email  # For email parsing
+from email.header import decode_header  # For decoding email headers
+import datetime  # For timestamp handling
+import gzip  # For handling gzip compressed files
+import zipfile  # For handling zip archives
+import xml.etree.ElementTree as ET  # For XML parsing
+from typing import Dict, Any, Optional  # Type hints
+from analyzer import DMARCAnalyzer, process_dmarc_report, save_combined_report  # Custom DMARC analysis
+import logging  # For application logging
+
+# Set up logging configuration
+# - Logs both to file and console
+# - Uses DEBUG level for detailed tracking
+# - Includes timestamp, log level, and message in log format
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -22,25 +28,33 @@ logging.basicConfig(
     ]
 )
 
-# Enable IMAP debug logging for troubleshooting
+# Enable detailed IMAP debugging for troubleshooting connection issues
 imaplib.Debug = 4
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 logging.info("Environment variables loaded")
 
 def extract_compressed_file(file_path: str, extract_dir: str) -> Optional[str]:
     """
-    Extract a compressed DMARC report file (zip or gzip) and return the path to the extracted XML file.
+    Extract DMARC reports from compressed files (ZIP or GZIP)
+    
+    Args:
+        file_path: Path to the compressed file
+        extract_dir: Directory where files should be extracted
+        
+    Returns:
+        Optional[str]: Path to the extracted XML file, or None if extraction fails
     """
     logging.info(f"Starting extraction of file: {file_path}")
     logging.debug(f"Extraction directory: {extract_dir}")
     
     try:
+        # Handle ZIP files
         if file_path.endswith('.zip'):
             logging.debug("Processing ZIP file")
             with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                # Look for XML files in the archive
+                # Find XML files in the archive
                 xml_files = [f for f in zip_ref.namelist() if f.endswith('.xml')]
                 logging.debug(f"Found XML files in ZIP: {xml_files}")
                 
@@ -52,7 +66,8 @@ def extract_compressed_file(file_path: str, extract_dir: str) -> Optional[str]:
                 extracted_path = os.path.join(extract_dir, xml_files[0])
                 logging.info(f"Successfully extracted ZIP to: {extracted_path}")
                 return extracted_path
-                
+        
+        # Handle GZIP files
         elif file_path.endswith('.gz'):
             logging.debug("Processing GZIP file")
             xml_path = os.path.join(extract_dir, os.path.basename(file_path)[:-3])
@@ -68,16 +83,28 @@ def extract_compressed_file(file_path: str, extract_dir: str) -> Optional[str]:
 
 def parse_dmarc_report(xml_path: str) -> Dict[str, Any]:
     """
-    Parse a DMARC XML report file and convert it to a dictionary format.
+    Parse DMARC XML report into a structured dictionary format
+    
+    Processes three main sections:
+    1. Report metadata (organization info, dates)
+    2. Policy information (domain settings)
+    3. Individual records (authentication results)
+    
+    Args:
+        xml_path: Path to the XML report file
+        
+    Returns:
+        Dict containing parsed report data
     """
     logging.info(f"Starting to parse DMARC report: {xml_path}")
     
     try:
+        # Parse XML tree
         tree = ET.parse(xml_path)
         root = tree.getroot()
         logging.debug(f"XML root tag: {root.tag}")
         
-        # Initialize report structure
+        # Initialize basic report structure
         report_data = {
             "report_metadata": {},
             "policy_published": {},
@@ -99,7 +126,7 @@ def parse_dmarc_report(xml_path: str) -> Dict[str, Any]:
         else:
             logging.warning("No metadata section found in XML")
         
-        # Parse policy published section
+        # Parse policy published section (domain settings)
         policy = root.find("policy_published")
         if policy is not None:
             logging.debug("Parsing policy section")
@@ -115,7 +142,7 @@ def parse_dmarc_report(xml_path: str) -> Dict[str, Any]:
         else:
             logging.warning("No policy section found in XML")
         
-        # Parse individual records
+        # Parse individual authentication records
         records = root.findall("record")
         logging.debug(f"Found {len(records)} records to parse")
         
@@ -152,7 +179,14 @@ def parse_dmarc_report(xml_path: str) -> Dict[str, Any]:
 
 def connect_to_email() -> Optional[imaplib.IMAP4_SSL]:
     """
-    Establish a connection to the email server using credentials from environment variables.
+    Establish secure IMAP connection to email server
+    
+    Uses environment variables for credentials:
+    - EMAIL_ADDRESS: Email address to connect with
+    - APP_PASSWORD: Application-specific password for authentication
+    
+    Returns:
+        IMAP4_SSL connection object if successful, None if connection fails
     """
     logging.info("Attempting to connect to email server")
     
@@ -177,7 +211,17 @@ def connect_to_email() -> Optional[imaplib.IMAP4_SSL]:
 
 def process_email_attachment(attachment_path: str, extracted_dir: str, analyzer: DMARCAnalyzer) -> None:
     """
-    Process a single email attachment containing a DMARC report.
+    Process a single DMARC report attachment
+    
+    Handles the workflow of:
+    1. Extracting compressed files
+    2. Parsing XML reports
+    3. Processing report data
+    
+    Args:
+        attachment_path: Path to the attachment file
+        extracted_dir: Directory for extracted files
+        analyzer: DMARCAnalyzer instance for processing
     """
     logging.info(f"Processing attachment: {attachment_path}")
     logging.debug(f"Extraction directory: {extracted_dir}")
@@ -197,24 +241,34 @@ def process_email_attachment(attachment_path: str, extracted_dir: str, analyzer:
 
 def get_last_n_emails(imap: imaplib.IMAP4_SSL, n: int) -> None:
     """
-    Retrieve and process the last n emails from the inbox.
+    Retrieve and process the most recent emails from inbox
+    
+    Main processing workflow:
+    1. Creates necessary directories
+    2. Fetches recent emails
+    3. Extracts and processes attachments
+    4. Generates combined report
+    
+    Args:
+        imap: Active IMAP connection
+        n: Number of recent emails to process
     """
     logging.info(f"Starting to fetch last {n} emails")
     
-    # Create necessary directories
+    # Set up directory structure
     email_dir = "downloaded_emails"
     os.makedirs(email_dir, exist_ok=True)
     logging.debug(f"Created directory: {email_dir}")
 
-    # Initialize analyzer
+    # Initialize DMARC analyzer
     dmarc_analyzer = DMARCAnalyzer()
     logging.debug("Initialized DMARCAnalyzer")
 
-    # Select the inbox
+    # Select and access inbox
     imap.select('INBOX')
     logging.debug("Selected INBOX")
 
-    # Get all email IDs and select the most recent n
+    # Fetch email IDs and process most recent ones
     _, messages = imap.search(None, 'ALL')
     email_ids = messages[0].split()
     total_emails = len(email_ids)
@@ -223,12 +277,13 @@ def get_last_n_emails(imap: imaplib.IMAP4_SSL, n: int) -> None:
     last_n_emails = email_ids[-n:] if len(email_ids) > n else email_ids
     logging.info(f"Processing {len(last_n_emails)} emails")
 
+    # Process each email
     for i, email_id in enumerate(reversed(last_n_emails), 1):
         try:
             email_id_str = email_id.decode('utf-8')
             logging.info(f"Processing email {i}/{n} (ID: {email_id_str})")
             
-            # Fetch the email content
+            # Fetch email content
             logging.debug(f"Fetching email content for ID: {email_id_str}")
             _, msg_data = imap.fetch(email_id_str, '(RFC822)')
             if not msg_data or not msg_data[0]:
@@ -239,7 +294,7 @@ def get_last_n_emails(imap: imaplib.IMAP4_SSL, n: int) -> None:
             email_message = email.message_from_bytes(email_body)
             logging.debug(f"Email subject: {email_message.get('Subject')}")
             
-            # Create directories for this email
+            # Create directory structure for this email
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             email_specific_dir = os.path.join(email_dir, f"email_{i}_{timestamp}")
             attachments_dir = os.path.join(email_specific_dir, "attachments")
@@ -250,7 +305,7 @@ def get_last_n_emails(imap: imaplib.IMAP4_SSL, n: int) -> None:
             os.makedirs(extracted_dir, exist_ok=True)
             logging.debug(f"Created directories for email {i}")
             
-            # Process email parts
+            # Handle multipart emails and process attachments
             if email_message.is_multipart():
                 logging.debug("Processing multipart email")
                 for part in email_message.walk():
@@ -260,10 +315,11 @@ def get_last_n_emails(imap: imaplib.IMAP4_SSL, n: int) -> None:
                     filename = part.get_filename()
                     if filename:
                         logging.debug(f"Processing attachment: {filename}")
-                        # Clean filename
+                        # Clean filename of potentially problematic characters
                         filename = "".join(c for c in filename if c.isalnum() or c in '._- ')
                         filepath = os.path.join(attachments_dir, filename)
                         
+                        # Save and process attachment
                         with open(filepath, 'wb') as f:
                             f.write(part.get_payload(decode=True))
                         logging.debug(f"Saved attachment to: {filepath}")
@@ -276,16 +332,17 @@ def get_last_n_emails(imap: imaplib.IMAP4_SSL, n: int) -> None:
             logging.error(f"Error processing email {i}: {str(e)}", exc_info=True)
             continue
 
-    # Save the combined report
+    # Generate final combined report
     logging.info("Saving combined report")
     save_combined_report(email_dir, dmarc_analyzer)
 
+# Main execution block
 if __name__ == "__main__":
     logging.info("=== Starting DMARC report processing ===")
     imap = connect_to_email()
     if imap:
         try:
-            get_last_n_emails(imap, 20)  # Process the last 3 emails
+            get_last_n_emails(imap, 20)  # Process the last 20 emails
         finally:
             imap.logout()
             logging.info("Logged out of IMAP server")

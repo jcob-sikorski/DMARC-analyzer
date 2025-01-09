@@ -1,14 +1,18 @@
+# Standard library imports for core functionality
 import logging
 from typing import Dict, Any, List, Tuple, Optional
-import socket
-import requests
-from collections import defaultdict
-import datetime
-import os
-import json
-import traceback
+import socket  # For DNS lookups
+import requests  # For making HTTP requests
+from collections import defaultdict  # For automatic dictionary initialization
+import datetime  # For timestamp handling
+import os  # For file operations
+import json  # For JSON processing
+import traceback  # For detailed error tracking
 
-# Configure logging
+# Set up logging configuration
+# - Logs will be written to both a file and console
+# - Debug level enables detailed tracking
+# - Format includes timestamp, log level, and message
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -19,7 +23,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Constants for server categorization
+# Dictionary mappings for categorizing different types of email servers
+# These help identify the source and legitimacy of emails
+
+# Known legitimate email service providers
 LEGITIMATE_SERVERS = {
     'outlook.com': 'Microsoft 365',
     'microsoft.com': 'Microsoft 365',
@@ -34,6 +41,7 @@ LEGITIMATE_SERVERS = {
     'mailjet.com': 'Mailjet'
 }
 
+# Known email forwarding services
 FORWARDER_SERVERS = {
     'protonmail': 'ProtonMail',
     'fastmail.com': 'FastMail',
@@ -43,6 +51,7 @@ FORWARDER_SERVERS = {
     'pobox.com': 'Pobox'
 }
 
+# Known email security gateway providers
 SECURITY_GATEWAYS = {
     'mimecast.com': 'Mimecast',
     'barracuda.com': 'Barracuda',
@@ -54,16 +63,19 @@ SECURITY_GATEWAYS = {
     'sophos': 'Sophos Email'
 }
 
-# Cache class with debug logging
+# Cache class to store DNS and geolocation lookups
+# This reduces API calls and improves performance
 class Cache:
     def __init__(self, cache_file: str):
+        """Initialize cache with specified file path"""
         logger.info(f"Initializing cache with file: {cache_file}")
         self.cache_file = cache_file
         self.cache = {}
         self.load()
     
     def load(self) -> None:
-        """Load cache from disk"""
+        """Load cached data from disk
+        If file doesn't exist or has errors, starts with empty cache"""
         logger.debug(f"Loading cache from {self.cache_file}")
         try:
             if os.path.exists(self.cache_file):
@@ -77,7 +89,8 @@ class Cache:
             logger.debug(traceback.format_exc())
     
     def save(self) -> None:
-        """Save cache to disk"""
+        """Save current cache to disk
+        Creates directories if they don't exist"""
         logger.debug(f"Saving cache to {self.cache_file}")
         try:
             os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
@@ -89,26 +102,29 @@ class Cache:
             logger.debug(traceback.format_exc())
     
     def get(self, key: str) -> Optional[Any]:
-        """Get value from cache"""
+        """Retrieve value from cache by key"""
         value = self.cache.get(key)
         logger.debug(f"Cache get: {key} -> {value}")
         return value
     
     def set(self, key: str, value: Any) -> None:
-        """Set value in cache and save to disk"""
+        """Store value in cache and persist to disk"""
         logger.debug(f"Cache set: {key} = {value}")
         self.cache[key] = value
         self.save()
 
+# Main DMARC analysis class
 class DMARCAnalyzer:
     def __init__(self):
+        """Initialize analyzer with separate caches for DNS and geolocation data"""
         logger.info("Initializing DMARCAnalyzer")
-        # Initialize caches
         self.dns_cache = Cache('cache/dns_cache.json')
         self.geo_cache = Cache('cache/geo_cache.json')
         self.reset()
 
     def reset(self):
+        """Reset all analysis results to initial state
+        Called at initialization and between analysis runs"""
         logger.info("Resetting analyzer state")
         self.combined_results = {
             'total_emails': 0,
@@ -128,6 +144,8 @@ class DMARCAnalyzer:
         logger.debug("Analyzer state reset complete")
 
     def perform_reverse_dns(self, ip: str) -> str:
+        """Perform reverse DNS lookup for an IP address
+        Uses cache to avoid redundant lookups"""
         logger.debug(f"Performing reverse DNS lookup for IP: {ip}")
         cached_result = self.dns_cache.get(ip)
         if cached_result:
@@ -145,6 +163,8 @@ class DMARCAnalyzer:
             return "Unknown"
 
     def get_ip_geolocation(self, ip: str) -> Dict[str, str]:
+        """Get geolocation information for an IP address
+        Uses ipinfo.io API with caching"""
         logger.debug(f"Getting geolocation for IP: {ip}")
         cached_result = self.geo_cache.get(ip)
         if cached_result:
@@ -174,10 +194,12 @@ class DMARCAnalyzer:
         return result
 
     def categorize_sender(self, ip: str, hostname: str) -> Tuple[str, str]:
+        """Categorize email sender based on hostname
+        Returns tuple of (category, system_name)"""
         logger.debug(f"Categorizing sender - IP: {ip}, Hostname: {hostname}")
         hostname_lower = hostname.lower()
         
-        # Check each category and log the result
+        # Check against known server categories
         for category, domains in [
             ('legitimate', LEGITIMATE_SERVERS),
             ('forwarder', FORWARDER_SERVERS),
@@ -192,6 +214,8 @@ class DMARCAnalyzer:
         return 'unknown', 'Unknown System'
 
     def analyze_authentication(self, record: Dict[str, Any], sender_category: str, system_name: str) -> str:
+        """Analyze DMARC authentication results
+        Returns authentication status based on DKIM/SPF results and sender category"""
         logger.debug(f"Analyzing authentication for {system_name} ({sender_category})")
         logger.debug(f"Authentication record: {record}")
         
@@ -201,11 +225,12 @@ class DMARCAnalyzer:
         
         logger.info(f"Authentication results - DKIM: {dkim_result}, SPF: {spf_result}")
         
+        # Special handling for known legitimate services
         if system_name in ['Microsoft 365', 'Google Workspace'] and spf_result == 'fail':
             logger.info(f"Special case: {system_name} with SPF fail -> forwarded")
             return 'forwarded'
         
-        # Log the authentication decision process
+        # Determine authentication status
         result = None
         if dkim_result == 'pass' and spf_result == 'pass':
             result = 'authenticated'
@@ -224,6 +249,7 @@ class DMARCAnalyzer:
         return result
 
     def update_date_range(self, begin_timestamp: str, end_timestamp: str) -> None:
+        """Update the analysis date range based on report timestamps"""
         logger.debug(f"Updating date range - Begin: {begin_timestamp}, End: {end_timestamp}")
         try:
             begin_date = datetime.datetime.fromtimestamp(int(begin_timestamp))
@@ -246,23 +272,25 @@ class DMARCAnalyzer:
             logger.debug(traceback.format_exc())
 
     def analyze_dmarc_report(self, report_data: Dict[str, Any]) -> None:
+        """Main method to analyze a DMARC report
+        Processes all records and updates combined results"""
         logger.info("\nStarting DMARC report analysis")
         logger.debug(f"Report data: {json.dumps(report_data, indent=2)}")
         
         try:
-            # Update date range
+            # Update date range from report metadata
             begin_time = report_data['report_metadata'].get('date_range_begin')
             end_time = report_data['report_metadata'].get('date_range_end')
             if begin_time and end_time:
                 self.update_date_range(begin_time, end_time)
             
-            # Track domain
+            # Track domain being analyzed
             domain = report_data['policy_published'].get('domain')
             if domain:
                 logger.info(f"Processing domain: {domain}")
                 self.combined_results['domains'].add(domain)
             
-            # Process records
+            # Process individual records
             records = report_data.get('records', [])
             logger.info(f"Processing {len(records)} records")
             
@@ -277,18 +305,21 @@ class DMARCAnalyzer:
                 self.combined_results['total_emails'] += count
                 logger.debug(f"Email count: {count}")
                 
+                # Gather information about the sender
                 hostname = self.perform_reverse_dns(ip)
                 sender_category, system_name = self.categorize_sender(ip, hostname)
                 logger.debug(f"Sender info - Category: {sender_category}, System: {system_name}")
                 
+                # Get and record geolocation data
                 geo_info = self.get_ip_geolocation(ip)
                 self.combined_results['countries'][geo_info['country']] += count
                 logger.debug(f"Geolocation: {geo_info}")
                 
+                # Analyze authentication results
                 auth_result = self.analyze_authentication(record, sender_category, system_name)
                 logger.debug(f"Authentication result: {auth_result}")
                 
-                # Update results
+                # Update statistics based on authentication result
                 if auth_result in ('authenticated', 'legitimate_with_spf_fail'):
                     self.combined_results['legitimate_systems'][system_name] += count
                 elif auth_result == 'forwarded':
@@ -304,173 +335,4 @@ class DMARCAnalyzer:
 
         except Exception as e:
             logger.error(f"Error analyzing report: {str(e)}")
-            logger.debug(traceback.format_exc())
-
-    def generate_combined_report(self) -> str:
-        """
-        Generate a plain-text combined report based on the analyzed DMARC data.
-        Returns a formatted string containing the report.
-        """
-        logger.info("Generating combined DMARC report")
-        
-        # Format date range for the report
-        date_range = ""
-        if self.combined_results['date_range']['start'] and self.combined_results['date_range']['end']:
-            start_date = self.combined_results['date_range']['start'].strftime("%b %d")
-            end_date = self.combined_results['date_range']['end'].strftime("%b %d")
-            date_range = f"{start_date} - {end_date}"
-        
-        # Build the report sections
-        report_lines = [
-            "Email Security Report",
-            f"Total Emails Sent: {self.combined_results['total_emails']:,}",
-            f"Emails Forwarded: {self.combined_results['forwarded']}",
-            f"- Recognized Forwarders: {self.combined_results['forwarded'] - self.combined_results['suspicious_forwards']} emails.",
-            f"- Suspicious Forwarders: {self.combined_results['suspicious_forwards']} emails.",
-            "",
-            "Authentication Results:",
-            "- Legitimate Systems:"
-        ]
-        
-        # Add legitimate systems section
-        for system, count in self.combined_results['legitimate_systems'].items():
-            report_lines.append(f"- {system}: {count} emails")
-        
-        # Add forwarded emails section
-        report_lines.extend([
-            "",
-            "- Forwarded Emails:",
-            f"- {self.combined_results['forwarded']} emails have been forwarded. No action required."
-        ])
-        
-        if self.combined_results['suspicious_forwards'] > 0:
-            report_lines.append(
-                f"- {self.combined_results['suspicious_forwards']} emails were forwarded via suspicious servers. "
-                "Closer monitoring required."
-            )
-        
-        # Add phishing attempts section
-        if self.combined_results['potential_phishing'] > 0:
-            report_lines.extend([
-                "",
-                "- Phishing Attempts:",
-                f"- {self.combined_results['potential_phishing']} phishing emails pretending to come from your domain. "
-                "Immediate action required."
-            ])
-        
-        # Add security gateway section
-        if self.combined_results['security_scanned'] > 0:
-            report_lines.extend([
-                "",
-                "- Security Gateway:",
-                f"- {self.combined_results['security_scanned']} emails were scanned by spam filters. "
-                "No further action needed."
-            ])
-        
-        # Add country summary
-        if self.combined_results['countries']:
-            report_lines.extend([
-                "",
-                "Country Summary:"
-            ])
-            
-            # Sort countries by email volume
-            sorted_countries = sorted(
-                self.combined_results['countries'].items(),
-                key=lambda x: x[1],
-                reverse=True
-            )
-            
-            # Format countries for display
-            main_country = sorted_countries[0][0]
-            other_countries = [country for country, _ in sorted_countries[1:]]
-            
-            if date_range and other_countries:
-                country_list = ", ".join(other_countries)
-                report_lines.append(
-                    f'During the week of {date_range}, most of your emails originated from {main_country}, '
-                    f'with additional traffic detected from {country_list}.'
-                )
-            elif date_range:
-                report_lines.append(
-                    f'During the week of {date_range}, your emails originated from {main_country}.'
-                )
-        
-        # Add any misconfigurations or recommendations
-        if self.combined_results['misconfigurations']:
-            report_lines.extend([
-                "",
-                "Recommendations:",
-                *[f"- {issue}" for issue in self.combined_results['misconfigurations']]
-            ])
-        
-        logger.debug("Report generation complete")
-        return "\n".join(report_lines)
-
-def process_dmarc_report(report_data: Dict[str, Any], report_dir: str, analyzer: 'DMARCAnalyzer') -> None:
-    """
-    Process a DMARC report and save individual results.
-    The analyzer parameter is type-hinted with a string to avoid the forward reference issue.
-    """
-    logger.info(f"\nProcessing DMARC report for directory: {report_dir}")
-    try:
-        analyzer.analyze_dmarc_report(report_data)
-        
-        os.makedirs(report_dir, exist_ok=True)
-        report_path = os.path.join(report_dir, 'report.json')
-        logger.debug(f"Saving individual report to: {report_path}")
-        
-        with open(report_path, 'w') as f:
-            json.dump(report_data, f, indent=2)
-        logger.info("Individual report saved successfully")
-            
-    except Exception as e:
-        logger.error(f"Error processing DMARC report: {str(e)}")
-        logger.debug(traceback.format_exc())
-
-def save_combined_report(base_dir: str, analyzer: 'DMARCAnalyzer') -> None:
-    """
-    Save the combined report from all processed DMARC reports.
-    The analyzer parameter is type-hinted with a string to avoid the forward reference issue.
-    """
-    logger.info(f"\nSaving combined report to directory: {base_dir}")
-    try:
-        combined_dir = os.path.join(base_dir, 'combined_results')
-        os.makedirs(combined_dir, exist_ok=True)
-        
-        logger.debug("Generating combined report")
-        report_text = analyzer.generate_combined_report()
-        
-        report_path = os.path.join(combined_dir, 'combined_report.txt')
-        logger.debug(f"Saving report to: {report_path}")
-        with open(report_path, 'w') as f:
-            f.write(report_text)
-        
-        # Prepare results for JSON
-        logger.debug("Preparing results for JSON serialization")
-        results_dict = {
-            **analyzer.combined_results,
-            'legitimate_systems': dict(analyzer.combined_results['legitimate_systems']),
-            'countries': dict(analyzer.combined_results['countries']),
-            'domains': list(analyzer.combined_results['domains']),
-            'date_range': {
-                'start': analyzer.combined_results['date_range']['start'].isoformat() 
-                    if analyzer.combined_results['date_range']['start'] else None,
-                'end': analyzer.combined_results['date_range']['end'].isoformat() 
-                    if analyzer.combined_results['date_range']['end'] else None
-            }
-        }
-        
-        analysis_path = os.path.join(combined_dir, 'combined_analysis.json')
-        logger.debug(f"Saving analysis results to: {analysis_path}")
-        with open(analysis_path, 'w') as f:
-            json.dump(results_dict, f, indent=2)
-        
-        logger.info(f"Combined report saved successfully to: {report_path}")
-        logger.info("\nAnalysis Results Summary:")
-        logger.info("========================")
-        logger.info(report_text)
-        
-    except Exception as e:
-        logger.error(f"Error saving combined report: {str(e)}")
-        logger.debug(traceback.format_exc())
+            logger.debug

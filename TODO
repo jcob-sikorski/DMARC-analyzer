@@ -1,0 +1,12 @@
+1. Understand the meaning behind each paragraph in a DMARC report Google Docs system ✅
+2. Learn how to host a server on hitme pl
+3. Using python connect to the mail Alex sent you credentials to. ✅
+4. Understand what information gives you IPInfo. ✅
+5. Learn how to download attachments from sh @ domain. ✅
+6. Understand the structure of each XML file (from all kinds o different providers). ✅
+7. Create system which parses those XML files. ✅
+8. Extract relevant information using IPInfo and XML files. ✅
+9. Examine the system and check if everything works according to specification outlined in a Google Doc.
+9. Implement error handling and edge cases.
+10. Figure out what to do with aggregated data after a run (database?)
+11. Next steps to be done.
