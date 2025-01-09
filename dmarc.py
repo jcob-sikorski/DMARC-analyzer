@@ -9,6 +9,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 import json
 from typing import Dict, Any
+from analyzer import *
 
 # Enable IMAP debug logging
 imaplib.Debug = 4
@@ -107,7 +108,7 @@ def connect_to_email():
         print(f"Error connecting to email: {str(e)}")
         return None
 
-def get_last_10_emails(imap):
+def get_last_n_emails(imap, n):
     print("\n=== Starting email fetch process ===")
     
     email_dir = "downloaded_emails"
@@ -121,14 +122,14 @@ def get_last_10_emails(imap):
     _, messages = imap.search(None, 'ALL')
     email_ids = messages[0].split()
     
-    # Get last 10 emails
-    last_10_emails = email_ids[-10:] if len(email_ids) > 10 else email_ids
+    # Get last n emails
+    last_n_emails = email_ids[-n:] if len(email_ids) > n else email_ids
 
-    for i, email_id in enumerate(reversed(last_10_emails), 1):
+    for i, email_id in enumerate(reversed(last_n_emails), 1):
         try:
             # Convert email_id to string
             email_id_str = email_id.decode('utf-8')
-            print(f"\nFetching email {i}/10 (ID: {email_id_str})")
+            print(f"\nFetching email {i}/{n} (ID: {email_id_str})")
             
             # Fetch the email
             status, msg_data = imap.fetch(email_id_str, '(RFC822)')
@@ -200,6 +201,12 @@ def get_last_10_emails(imap):
                                         with open(json_path, 'w', encoding='utf-8') as f:
                                             json.dump(report_data, f, indent=2)
                                         print(f"Parsed DMARC report saved to: {json_path}")
+                                        
+                                        # Process the DMARC report and generate analysis
+                                        report_text = process_dmarc_report(report_data, extracted_dir)
+                                        print("\nReport Summary:")
+                                        print("==============")
+                                        print(report_text)
             else:
                 body = email_message.get_payload(decode=True)
                 if body:
@@ -216,7 +223,7 @@ if __name__ == "__main__":
     imap = connect_to_email()
     if imap:
         try:
-            get_last_10_emails(imap)
+            get_last_n_emails(imap, 1)
         finally:
             imap.logout()
         print("\n=== Email process completed! ===")
