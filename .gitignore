@@ -3,5 +3,5 @@ downloaded_emails
 venv
 __pycache__
 cache
-dmarc_analyzer.log
+dmarc_analyzer*.log
 dmarc_processing.log
