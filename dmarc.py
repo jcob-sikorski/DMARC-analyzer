@@ -1,5 +1,3 @@
-# This script handles the automated retrieval and processing of DMARC reports from email
-
 # Standard library and third-party imports for core functionality
 from dotenv import load_dotenv  # For loading environment variables
 import os  # For file and directory operations
@@ -215,7 +213,6 @@ def connect_to_email() -> Optional[imaplib.IMAP4_SSL]:
         logging.error(f"Error connecting to email: {str(e)}", exc_info=True)
         return None
 
-# TODO: inspect this function to check if it meets the requirements
 def process_email_attachment(attachment_path: str, extracted_dir: str, analyzer: DMARCAnalyzer) -> None:
     """
     Process a single DMARC report attachment
@@ -353,7 +350,7 @@ if __name__ == "__main__":
     imap = connect_to_email()
     if imap:
         try:
-            get_last_n_emails(imap, 20)  # Process the last 20 emails
+            get_last_n_emails(imap, 10)  # Process the last 20 emails
         finally:
             imap.logout()
             logging.info("Logged out of IMAP server")
