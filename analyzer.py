@@ -85,13 +85,14 @@ def download_dmarc_dictionaries():
         "0": "Legitimate",
         "1818030106": "Security Gateway",
         "1706054660": "Forwarders",
-        "178339195": "Phishing"  # Added but not used in final output
+        "178339195": "Phishing"
     }
     
     # Initialize empty structures
     LEGITIMATE_SERVERS = {}  # Dictionary for domain->service mapping
     FORWARDER_SERVERS = set()  # Set for just domain names
     SECURITY_GATEWAYS = set()  # Set for just domain names
+    PHISHING_SERVERS = set() # Set for just domain names
     
     try:
         for gid, category in sheet_configs.items():
@@ -141,8 +142,12 @@ def download_dmarc_dictionaries():
         # Log security gateways - adding newline for readability
         logger.debug("\nSECURITY_GATEWAYS:")
         logger.debug(pformat(SECURITY_GATEWAYS))
+
+        # Log phishing servers - adding newline for readability
+        logger.debug("\nPHISHING_SERVERS:")
+        logger.debug(pformat(PHISHING_SERVERS))
         
-        return LEGITIMATE_SERVERS, FORWARDER_SERVERS, SECURITY_GATEWAYS
+        return LEGITIMATE_SERVERS, FORWARDER_SERVERS, SECURITY_GATEWAYS, PHISHING_SERVERS
         
     except Exception as e:
         logger.error(f"Failed to download DMARC dictionaries: {str(e)}")
@@ -150,7 +155,7 @@ def download_dmarc_dictionaries():
 
 # from the google sheets
 # Known legitimate email service providers and their corresponding services
-LEGITIMATE_SERVERS, FORWARDER_SERVERS, SECURITY_GATEWAYS = download_dmarc_dictionaries()
+LEGITIMATE_SERVERS, FORWARDER_SERVERS, SECURITY_GATEWAYS, PHISHING_SERVERS = download_dmarc_dictionaries()
 
 # Cache class to store DNS and geolocation lookups
 # This reduces API calls and improves performance
@@ -291,90 +296,60 @@ class DMARCAnalyzer:
 
     def categorize_sender(self, ip: str, hostname: str) -> Tuple[str, str]:
         """
-        Categorize email sender based on hostname.
+        Categorize email sender based on hostname with enhanced phishing detection.
         
-        This function checks if the hostname matches any known domains in our three collections:
-        - LEGITIMATE_SERVERS (dictionary mapping domains to service names)
-        - FORWARDER_SERVERS (set of forwarder domains)
-        - SECURITY_GATEWAYS (set of security gateway domains)
+        This function implements a comprehensive categorization approach:
+        1. First checks if the hostname is missing or unknown (strong phishing indicator)
+        2. Then checks against known phishing domains
+        3. Validates against legitimate servers
+        4. Checks forwarder and security gateway lists
+        5. If not found in any known good list, marks as potential phishing
         
         Args:
             ip: The IP address of the sender
-            hostname: The hostname to categorize
-            
+            hostname: The hostname to categorize (may be "Unknown" if DNS lookup failed)
+                
         Returns:
             tuple: (category, system_name) where:
-                - category is one of: 'legitimate', 'forwarder', 'security_gateway', 'unknown'
-                - system_name is the service name for legitimate servers or a default value for others
+                - category is one of: 'legitimate', 'forwarder', 'security_gateway', 
+                                    'phishing', 'potential_phishing'
+                - system_name is the service name or a descriptive label
         """
         logger.debug(f"Categorizing sender - IP: {ip}, Hostname: {hostname}")
         
+        # Check for missing or failed DNS lookup - strong phishing indicator
+        if hostname == "Unknown" or not hostname:
+            logger.warning(f"No valid hostname for IP {ip} - marking as phishing")
+            return 'phishing', 'Unknown Sender (No DNS)'
+        
         hostname_lower = hostname.lower()
-
-        # First check legitimate servers since they have service name mappings
+        
+        # First check against known phishing domains
+        if any(domain in hostname_lower for domain in PHISHING_SERVERS):
+            logger.warning(f"Matched known phishing domain: {hostname}")
+            return 'phishing', 'Known Phishing Domain'
+        
+        # Then check legitimate servers since they have service name mappings
         for domain, service_name in LEGITIMATE_SERVERS.items():
             if domain in hostname_lower:
                 logger.info(f"Sender {ip} ({hostname}) categorized as legitimate: {service_name}")
                 return 'legitimate', service_name
         
-        # Check forwarders (using set membership)
+        # Check forwarders
         for domain in FORWARDER_SERVERS:
             if domain in hostname_lower:
                 logger.info(f"Sender {ip} ({hostname}) categorized as forwarder")
                 return 'forwarder', 'Email Forwarder'
         
-        # Check security gateways (using set membership)
+        # Check security gateways
         for domain in SECURITY_GATEWAYS:
             if domain in hostname_lower:
                 logger.info(f"Sender {ip} ({hostname}) categorized as security gateway")
                 return 'security_gateway', 'Security Gateway'
         
-        logger.warning(f"Unable to categorize sender {ip} ({hostname})")
-        return 'unknown', 'Unknown System'
-
-    def analyze_authentication(self, record: Dict[str, Any], sender_category: str, system_name: str) -> str:
-        """Analyze DMARC authentication results
-        Returns authentication status based on DKIM/SPF results and sender category"""
-        logger.debug(f"Analyzing authentication for {system_name} ({sender_category})")
-        logger.debug(f"Authentication record: {record}")
-        
-        policy = record['policy_evaluated']
-        dkim_result = policy['dkim']
-        spf_result = policy['spf']
-        
-        logger.info(f"Authentication results - DKIM: {dkim_result}, SPF: {spf_result}")
-
-        # Special handling for known legitimate services
-        if system_name in LEGITIMATE_SERVERS.values() and spf_result == 'fail':
-            logger.info(f"Special case: {system_name} with SPF fail -> forwarded")
-            return 'forwarded'
-
-        # Check whether each email passed or failed authentication. 
-
-        # Legitimate, Forwarder, Phishing, Servers and Security Gateway
-
-        # Determine authentication status
-        result = None
-        if dkim_result == 'pass' and spf_result == 'pass':
-            result = 'authenticated'
-        elif dkim_result == 'pass' and sender_category == 'legitimate':
-            result = 'legitimate_with_spf_fail'
-        elif dkim_result == 'pass' and sender_category == 'forwarder':
-            result = 'forwarded'
-        elif dkim_result == 'pass':
-            result = 'suspicious_forward'
-        elif sender_category == 'security_gateway':
-            result = 'security_scanned'
-        else:
-            result = 'potential_phishing'
-
-        # TODO: Alignment (Internally Processed):
-        # Validate if SPF and DKIM align with the domain in the "From" header.
-        # Use alignment data internally to categorize emails but exclude
-        # it from client-facing reports.
-        
-        logger.info(f"Final authentication result: {result}")
-        return result
+        # If hostname is not in any known good list, mark as potential phishing
+        logger.warning(f"Unknown sender {ip} ({hostname}) - marking as potential phishing")
+        return 'potential_phishing', 'Unknown System'
 
     def check_alignment(self, record: Dict[str, Any]) -> Dict[str, bool]:
         """
@@ -478,56 +453,53 @@ class DMARCAnalyzer:
         
         return alignment_results
 
-    def analyze_authentication_with_alignment(self, record: Dict[str, Any], sender_category: str, system_name: str) -> Tuple[str, Dict[str, bool]]:
+    def analyze_authentication(self, record: Dict[str, Any], sender_category: str, system_name: str) -> Tuple[str, Dict[str, bool]]:
         """
-        Enhanced version of analyze_authentication that includes alignment checking.
+        Enhanced authentication analysis that considers phishing categorization.
         
-        This method analyzes both authentication results and domain alignment,
-        with special handling for different sender categories and authentication formats.
+        This method analyzes authentication results while taking into account:
+        1. Sender categorization (including phishing detection)
+        2. Domain alignment
+        3. Authentication results (DKIM/SPF)
+        4. Known legitimate service exceptions
         
         Args:
-            record: DMARC record data containing authentication results and policy information
-            sender_category: Category of the sending system (legitimate, forwarder, security_gateway)
-            system_name: Name of the sending system for logging and categorization
-            
+            record: DMARC record data
+            sender_category: Category from categorize_sender
+            system_name: System name from categorize_sender
+                
         Returns:
             Tuple of (authentication_result, alignment_results)
         """
-        logger.debug(f"Analyzing authentication and alignment for {system_name} ({sender_category})")
-        logger.debug(f"Record structure received: {json.dumps(record, indent=2)}")
+        logger.debug(f"Analyzing authentication for {system_name} ({sender_category})")
         
-        # Extract authentication results, handling both string and dict formats
+        # Extract authentication results
         policy = record.get('policy_evaluated', {})
         auth_results = record.get('auth_results', {})
         
         # Get DKIM and SPF results from both policy evaluation and auth_results
-        # Policy evaluation results are used for final disposition
-        dkim_policy = policy.get('dkim', 'fail')
-        spf_policy = policy.get('spf', 'fail')
+        dkim_policy = policy.get('dkim', 'fail').lower()
+        spf_policy = policy.get('spf', 'fail').lower()
         
-        # Auth results are used for additional validation
-        dkim_auth = auth_results.get('dkim', 'fail')
-        spf_auth = auth_results.get('spf', 'fail')
-        
-        # Handle string results by normalizing to lowercase
-        if isinstance(dkim_policy, str):
-            dkim_policy = dkim_policy.lower()
-        if isinstance(spf_policy, str):
-            spf_policy = spf_policy.lower()
-        if isinstance(dkim_auth, str):
-            dkim_auth = dkim_auth.lower()
-        if isinstance(spf_auth, str):
-            spf_auth = spf_auth.lower()
-            
-        # Check domain alignment
-        # This will work with the existing check_alignment method
+        # Get alignment results
         alignment_results = self.check_alignment(record)
         
         # Initialize authentication result
         auth_result = None
         
-        # Special handling for legitimate services (including SendGrid)
-        if system_name in LEGITIMATE_SERVERS.values() or '.sendgrid.net' in str(record.get('source_ip_hostname', '')):
+        # Enhanced decision logic incorporating phishing detection
+        if sender_category == 'phishing':
+            # Immediately categorize as potential phishing if sender was identified as such
+            auth_result = 'potential_phishing'
+            logger.warning(f"Phishing detected based on sender categorization - IP: {record.get('source_ip')}")
+            
+        elif sender_category == 'potential_phishing':
+            # Also mark as potential phishing if sender was not found in any known good list
+            auth_result = 'potential_phishing'
+            logger.warning(f"Potential phishing - unknown sender not in known good lists")
+            
+        elif system_name in LEGITIMATE_SERVERS.values():
+            # Handle legitimate services
             if spf_policy == 'fail':
                 if alignment_results['dkim_aligned'] and dkim_policy == 'pass':
                     auth_result = 'forwarded'
@@ -536,27 +508,22 @@ class DMARCAnalyzer:
             else:
                 auth_result = 'authenticated'
         
-        # Handle other cases based on authentication and alignment
         elif dkim_policy == 'pass' and spf_policy == 'pass':
             # Both authentications passed - check alignment
             if alignment_results['dkim_aligned'] or alignment_results['spf_aligned']:
                 auth_result = 'authenticated'
             else:
-                # At least one authentication passed but alignment failed
                 auth_result = 'authentication_mismatch'
         
-        # Handle forwarded email cases
         elif dkim_policy == 'pass' and sender_category == 'forwarder':
             if alignment_results['dkim_aligned']:
                 auth_result = 'forwarded'
             else:
                 auth_result = 'suspicious_forward'
         
-        # Handle security gateway cases
         elif sender_category == 'security_gateway':
             auth_result = 'security_scanned'
         
-        # Default case - potential phishing
         else:
             auth_result = 'potential_phishing'
         
@@ -672,7 +639,7 @@ class DMARCAnalyzer:
                 self.combined_results['countries'][geo_info['country']] += count
                 
                 # Perform enhanced authentication analysis with alignment
-                auth_result, alignment_results = self.analyze_authentication_with_alignment(
+                auth_result, alignment_results = self.analyze_authentication(
                     record, sender_category, system_name
                 )
                 

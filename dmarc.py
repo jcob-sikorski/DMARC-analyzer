@@ -350,7 +350,7 @@ if __name__ == "__main__":
     imap = connect_to_email()
     if imap:
         try:
-            get_last_n_emails(imap, 10)  # Process the last 20 emails
+            get_last_n_emails(imap, 100)  # Process the last 20 emails
         finally:
             imap.logout()
             logging.info("Logged out of IMAP server")
