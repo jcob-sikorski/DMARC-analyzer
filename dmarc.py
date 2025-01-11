@@ -11,13 +11,9 @@ import xml.etree.ElementTree as ET  # For XML parsing
 from typing import Dict, Any, Optional  # Type hints
 from analyzer import DMARCAnalyzer, process_dmarc_report, save_combined_report  # Custom DMARC analysis
 import logging  # For application logging
+import argparse
 
 # TODO: write the functionality to email the reports to clients automatically
-
-# TODO: implement batch processing of DMARC reports.
-
-# TODO: perform a test on a lot of emails and make sure that 
-# system properly handle all edge cases and inconsistencies
 
 # Set up logging configuration
 # - Logs both to file and console
@@ -38,6 +34,12 @@ imaplib.Debug = 4
 # Load environment variables from .env file
 load_dotenv()
 logging.info("Environment variables loaded")
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Process DMARC reports from email')
+    parser.add_argument('--days', type=int, default=7,
+                       help='Number of days of emails to process (default: 7)')
+    return parser.parse_args()
 
 def extract_compressed_file(file_path: str, extract_dir: str) -> Optional[str]:
     """
@@ -429,11 +431,12 @@ def is_recent_dmarc_report(filepath: str, extract_dir: str, days: int) -> bool:
 
 # Main execution block
 if __name__ == "__main__":
+    args = parse_arguments()
     logging.info("=== Starting DMARC report processing ===")
     imap = connect_to_email()
     if imap:
         try:
-            get_recent_emails(imap, days=1)  # Process emails from last 7 days
+            get_recent_emails(imap, days=args.days)  # Use the days argument from command line
         finally:
             imap.logout()
             logging.info("Logged out of IMAP server")

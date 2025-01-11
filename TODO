@@ -1,32 +1,13 @@
-1. Understand the meaning behind each paragraph in a DMARC report Google Docs system ✅
-2. Learn how to host a server on hitme pl
-3. Using python connect to the mail Alex sent you credentials to. ✅
-4. Understand what information gives you IPInfo. ✅
-5. Learn how to download attachments from sh @ domain. ✅
-6. Understand the structure of each XML file (from all kinds o different providers). ✅
-7. Create system which parses those XML files. ✅
-8. Extract relevant information using IPInfo and XML files. ✅
-9. Examine the system and check if everything works according to specification outlined in a Google Doc.
-9. Implement error handling and edge cases.
-10. Figure out what to do with aggregated data after a run (database?)
-11. Next steps to be done.
-
-# ----------------------------------------------------
-
 👉 send Alex a few txt files with the reports from January 9th for the following domains:
 
 - nashvillerealestate.com
 - domorealestate.com
 - jboswellteam.com
 
-👉 do not rely on the time the report came to the inbox but rather on xml <date_range> tag
-
-👉 generate these reports
-
 👉 check on your end to ensure there's nothing in your system that blocks access to VPS else send Alex a few estimates on how much it will cost to have a VPS from Google, AWS, and DO.
-
-👉 clarify which domain the report is for? Or is it a combined report? Since these 
 
 👉 reports should be sent individually to our clients, they should be broken down by domain name
 
 👉 how did you manage to generate the report for the last week when I only started sending emails to dmarc@sh-reports.com two days ago
+
+# ----------------------------------------------------
