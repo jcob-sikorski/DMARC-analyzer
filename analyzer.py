@@ -220,9 +220,25 @@ class DMARCAnalyzer:
         self.reset()
 
     def reset(self):
-        """Reset all analysis results to initial state
-        Called at initialization and between analysis runs"""
+        """Reset all analysis results to initial state"""
         logger.info("Resetting analyzer state")
+        # Domain-specific results
+        self.domain_results = defaultdict(lambda: {
+            'total_emails': 0,
+            'legitimate_systems': defaultdict(int),
+            'forwarded': 0,
+            'suspicious_forwards': 0,
+            'potential_phishing': 0,
+            'security_scanned': 0,
+            'countries': defaultdict(int),
+            'date_range': {
+                'start': None,
+                'end': None
+            },
+            'misconfigurations': []
+        })
+        
+        # Combined results across all domains
         self.combined_results = {
             'total_emails': 0,
             'legitimate_systems': defaultdict(int),
@@ -568,222 +584,280 @@ class DMARCAnalyzer:
         if auth_result in ('authentication_mismatch', 'suspicious_legitimate'):
             self.alignment_stats['alignment_issues'][auth_result] += 1
 
-    def update_date_range(self, begin_timestamp: str, end_timestamp: str) -> None:
-        """Update the analysis date range based on report timestamps"""
-        logger.debug(f"Updating date range - Begin: {begin_timestamp}, End: {end_timestamp}")
+    def update_date_range(self, domain: str, begin_timestamp: str, end_timestamp: str) -> None:
+        """Update the analysis date range for both domain-specific and combined results"""
+        logger.debug(f"Updating date range for domain {domain} - Begin: {begin_timestamp}, End: {end_timestamp}")
         try:
             begin_date = datetime.fromtimestamp(int(begin_timestamp))
             end_date = datetime.fromtimestamp(int(end_timestamp))
             
-            current_start = self.combined_results['date_range']['start']
-            current_end = self.combined_results['date_range']['end']
+            # Update domain-specific date range
+            current_start = self.domain_results[domain]['date_range']['start']
+            current_end = self.domain_results[domain]['date_range']['end']
             
             if current_start is None or begin_date < current_start:
-                logger.info(f"Updating start date to {begin_date}")
-                self.combined_results['date_range']['start'] = begin_date
-            
+                self.domain_results[domain]['date_range']['start'] = begin_date
             if current_end is None or end_date > current_end:
-                logger.info(f"Updating end date to {end_date}")
+                self.domain_results[domain]['date_range']['end'] = end_date
+            
+            # Update combined date range
+            if (self.combined_results['date_range']['start'] is None or 
+                begin_date < self.combined_results['date_range']['start']):
+                self.combined_results['date_range']['start'] = begin_date
+            if (self.combined_results['date_range']['end'] is None or 
+                end_date > self.combined_results['date_range']['end']):
                 self.combined_results['date_range']['end'] = end_date
                 
-            logger.debug(f"Updated date range: {self.combined_results['date_range']}")
         except (ValueError, TypeError) as e:
             logger.error(f"Error updating date range: {str(e)}")
             logger.debug(traceback.format_exc())
 
     def analyze_dmarc_report(self, report_data: Dict[str, Any]) -> None:
-        """
-        Analyze a single DMARC report and update combined statistics
-        
-        This enhanced version includes alignment checking while keeping
-        technical details internal and maintaining clear client reporting.
-        """
+        """Analyze a single DMARC report and update both domain-specific and combined statistics"""
         logger.info("\nStarting DMARC report analysis")
-        logger.debug(f"Report data: {json.dumps(report_data, indent=2)}")
         
         try:
+            domain = report_data['policy_published'].get('domain')
+            if not domain:
+                logger.warning("Report missing domain, skipping")
+                return
+            
+            logger.info(f"Processing report for domain: {domain}")
+            self.combined_results['domains'].add(domain)
+            
             # Process report metadata and date range
             begin_time = report_data['report_metadata'].get('date_range_begin')
             end_time = report_data['report_metadata'].get('date_range_end')
             if begin_time and end_time:
-                self.update_date_range(begin_time, end_time)
+                self.update_date_range(domain, begin_time, end_time)
             
-            # Track analyzed domain
-            domain = report_data['policy_published'].get('domain')
-            if domain:
-                logger.info(f"Processing domain: {domain}")
-                self.combined_results['domains'].add(domain)
-            
-            # Process individual authentication records
             records = report_data.get('records', [])
-            logger.info(f"Processing {len(records)} records")
+            logger.info(f"Processing {len(records)} records for domain {domain}")
             
             for record in records:
-                # Skip records without source IP
                 ip = record.get('source_ip')
                 if not ip:
-                    logger.warning("Record missing source IP, skipping")
                     continue
                 
-                # Process email count
-                logger.debug(f"\nProcessing record for IP: {ip}")
                 count = int(record.get('count', 0))
+                
+                # Update both domain and combined email counts
+                self.domain_results[domain]['total_emails'] += count
                 self.combined_results['total_emails'] += count
                 
-                # Perform DNS and sender categorization
                 hostname = self.perform_reverse_dns(ip)
                 sender_category, system_name = self.categorize_sender(ip, hostname)
                 
-                # Get geographical information
                 geo_info = self.get_ip_geolocation(ip)
+                self.domain_results[domain]['countries'][geo_info['country']] += count
                 self.combined_results['countries'][geo_info['country']] += count
                 
-                # Perform enhanced authentication analysis with alignment
                 auth_result, alignment_results = self.analyze_authentication(
                     record, sender_category, system_name
                 )
                 
-                # Update alignment statistics (kept internal)
-                self.update_alignment_statistics(auth_result, alignment_results)
-                
-                # Update client-facing statistics based on authentication result
+                # Update both domain and combined statistics
                 if auth_result == 'authenticated':
+                    self.domain_results[domain]['legitimate_systems'][system_name] += count
                     self.combined_results['legitimate_systems'][system_name] += count
                 elif auth_result == 'forwarded':
+                    self.domain_results[domain]['forwarded'] += count
                     self.combined_results['forwarded'] += count
-                elif auth_result == 'suspicious_forward' or auth_result == 'suspicious_legitimate':
+                elif auth_result in ('suspicious_forward', 'suspicious_legitimate'):
+                    self.domain_results[domain]['suspicious_forwards'] += count
                     self.combined_results['suspicious_forwards'] += count
                 elif auth_result == 'security_scanned':
+                    self.domain_results[domain]['security_scanned'] += count
                     self.combined_results['security_scanned'] += count
-                elif auth_result == 'potential_phishing' or auth_result == 'authentication_mismatch':
+                elif auth_result in ('potential_phishing', 'authentication_mismatch'):
+                    self.domain_results[domain]['potential_phishing'] += count
                     self.combined_results['potential_phishing'] += count
                 
-                # Add alignment-based recommendations if needed
                 if auth_result == 'authentication_mismatch':
                     recommendation = (
                         f"Domain alignment issue detected for {system_name}. "
                         "Consider reviewing DMARC policy configuration."
                     )
+                    if recommendation not in self.domain_results[domain]['misconfigurations']:
+                        self.domain_results[domain]['misconfigurations'].append(recommendation)
                     if recommendation not in self.combined_results['misconfigurations']:
                         self.combined_results['misconfigurations'].append(recommendation)
                 
-                logger.debug(f"Updated combined results: {json.dumps(self.combined_results, default=str, indent=2)}")
-
         except Exception as e:
             logger.error(f"Error analyzing report: {str(e)}")
             logger.debug(traceback.format_exc())
 
+    def generate_domain_report(self) -> str:
+        """Generate a human-readable report with domain-specific breakdowns"""
+        logger.info("Generating domain-specific DMARC report")
+        
+        report_lines = ["Email Security Report by Domain", ""]
+        
+        for domain, results in self.domain_results.items():
+            date_range = ""
+            if results['date_range']['start'] and results['date_range']['end']:
+                start_date = results['date_range']['start'].strftime("%b %d")
+                end_date = results['date_range']['end'].strftime("%b %d")
+                date_range = f"{start_date} - {end_date}"
+            
+            # Calculate recognized forwarders (ensure non-negative)
+            total_forwarded = max(0, results['forwarded'])
+            suspicious_forwards = max(0, results['suspicious_forwards'])
+            recognized_forwards = max(0, total_forwarded - suspicious_forwards)
+            
+            report_lines.extend([
+                f"Domain: {domain}",
+                "=" * (len(domain) + 8),
+                f"Total Emails Sent: {results['total_emails']:,}",
+                f"Emails Forwarded: {total_forwarded}",
+                f"- Recognized Forwarders: {recognized_forwards} emails",
+                f"- Suspicious Forwarders: {suspicious_forwards} emails",
+                "",
+                "Authentication Results:",
+                "- Legitimate Systems:"
+            ])
+            
+            for system, count in results['legitimate_systems'].items():
+                report_lines.append(f"  - {system}: {count} emails")
+            
+            report_lines.extend([
+                "",
+                "- Forwarded Emails:",
+                f"  - {total_forwarded} emails have been forwarded. No action required."
+            ])
+            
+            if suspicious_forwards > 0:
+                report_lines.append(
+                    f"  - {suspicious_forwards} emails were forwarded via suspicious servers. "
+                    "Closer monitoring required."
+                )
+            
+            if results['potential_phishing'] > 0:
+                report_lines.extend([
+                    "",
+                    "- Phishing Attempts:",
+                    f"  - {results['potential_phishing']} phishing emails pretending to come from this domain. "
+                    "Immediate action required."
+                ])
+            
+            if results['security_scanned'] > 0:
+                report_lines.extend([
+                    "",
+                    "- Security Gateway:",
+                    f"  - {results['security_scanned']} emails were scanned by spam filters. "
+                    "No further action needed."
+                ])
+            
+            if results['countries']:
+                report_lines.extend(["", "Country Summary:"])
+                sorted_countries = sorted(
+                    results['countries'].items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                )
+                main_country = sorted_countries[0][0]
+                other_countries = [country for country, _ in sorted_countries[1:]]
+                
+                if date_range and other_countries:
+                    country_list = ", ".join(other_countries)
+                    report_lines.append(
+                        f'During the week of {date_range}, most emails originated from {main_country}, '
+                        f'with additional traffic detected from {country_list}.'
+                    )
+                elif date_range:
+                    report_lines.append(
+                        f'During the week of {date_range}, emails originated from {main_country}.'
+                    )
+            
+            if results['misconfigurations']:
+                report_lines.extend([
+                    "",
+                    "Recommendations:",
+                    *[f"- {issue}" for issue in results['misconfigurations']]
+                ])
+            
+            report_lines.extend(["", "-" * 80, ""])
+        
+        return "\n".join(report_lines)
+
     def generate_combined_report(self) -> str:
-        """
-        Generate a human-readable report summarizing all analyzed DMARC data
-        
-        Creates a comprehensive report including:
-        - Overall email statistics
-        - Authentication results by system
-        - Forwarding analysis
-        - Security concerns (phishing attempts)
-        - Geographic distribution
-        - Recommendations
-        
-        Returns:
-            str: Formatted report text
-        """
+        """Generate a human-readable report summarizing all domains combined"""
         logger.info("Generating combined DMARC report")
         
-        # Format date range for reporting period
         date_range = ""
         if self.combined_results['date_range']['start'] and self.combined_results['date_range']['end']:
             start_date = self.combined_results['date_range']['start'].strftime("%b %d")
             end_date = self.combined_results['date_range']['end'].strftime("%b %d")
             date_range = f"{start_date} - {end_date}"
         
-        # Construct report header and overall statistics
+        domains_str = ", ".join(sorted(self.combined_results['domains']))
+        
+        # Calculate recognized forwarders (ensure non-negative)
+        total_forwarded = max(0, self.combined_results['forwarded'])
+        suspicious_forwards = max(0, self.combined_results['suspicious_forwards'])
+        recognized_forwards = max(0, total_forwarded - suspicious_forwards)
+        
         report_lines = [
-            "Email Security Report",
-            f"Total Emails Sent: {self.combined_results['total_emails']:,}",
-            f"Emails Forwarded: {self.combined_results['forwarded']}",
-            f"- Recognized Forwarders: {self.combined_results['forwarded'] - self.combined_results['suspicious_forwards']} emails.",
-            f"- Suspicious Forwarders: {self.combined_results['suspicious_forwards']} emails.",
+            "Combined Email Security Report",
+            "=========================",
+            f"Analyzed Domains: {domains_str}",
+            f"Report Period: {date_range}",
+            "",
+            f"Total Emails Across All Domains: {self.combined_results['total_emails']:,}",
+            f"Total Forwarded Emails: {total_forwarded}",
+            f"- Recognized Forwarders: {recognized_forwards} emails",
+            f"- Suspicious Forwarders: {suspicious_forwards} emails",
             "",
             "Authentication Results:",
             "- Legitimate Systems:"
         ]
         
-        # Add details for each legitimate email system
         for system, count in self.combined_results['legitimate_systems'].items():
-            report_lines.append(f"- {system}: {count} emails")
+            report_lines.append(f"  - {system}: {count} emails")
         
-        # Add information about forwarded emails
         report_lines.extend([
             "",
-            "- Forwarded Emails:",
-            f"- {self.combined_results['forwarded']} emails have been forwarded. No action required."
+            "Security Summary:",
+            f"- Total Legitimate Emails: {sum(self.combined_results['legitimate_systems'].values())}",
+            f"- Total Forwarded Emails: {total_forwarded}",
+            f"- Total Security Scanned: {self.combined_results['security_scanned']}",
+            f"- Total Potential Phishing: {self.combined_results['potential_phishing']}"
         ])
         
-        # Add warning for suspicious forwarding activity
-        if self.combined_results['suspicious_forwards'] > 0:
+        if suspicious_forwards > 0:
             report_lines.append(
-                f"- {self.combined_results['suspicious_forwards']} emails were forwarded via suspicious servers. "
-                "Closer monitoring required."
+                f"- {suspicious_forwards} suspicious forwards detected "
+                "across all domains. Enhanced monitoring recommended."
             )
         
-        # Add phishing attempt warnings if detected
         if self.combined_results['potential_phishing'] > 0:
             report_lines.extend([
                 "",
-                "- Phishing Attempts:",
-                f"- {self.combined_results['potential_phishing']} phishing emails pretending to come from your domain. "
-                "Immediate action required."
+                "Critical Security Alert:",
+                f"- {self.combined_results['potential_phishing']} potential phishing attempts "
+                "detected across all domains. Immediate investigation required."
             ])
         
-        # Add security gateway processing information
-        if self.combined_results['security_scanned'] > 0:
-            report_lines.extend([
-                "",
-                "- Security Gateway:",
-                f"- {self.combined_results['security_scanned']} emails were scanned by spam filters. "
-                "No further action needed."
-            ])
-        
-        # Add geographic distribution summary
         if self.combined_results['countries']:
-            report_lines.extend([
-                "",
-                "Country Summary:"
-            ])
-            
-            # Sort countries by email volume for reporting
+            report_lines.extend(["", "Geographic Distribution:"])
             sorted_countries = sorted(
                 self.combined_results['countries'].items(),
                 key=lambda x: x[1],
                 reverse=True
             )
             
-            # Format country information for display
-            main_country = sorted_countries[0][0]
-            other_countries = [country for country, _ in sorted_countries[1:]]
-            
-            # Add country distribution details
-            if date_range and other_countries:
-                country_list = ", ".join(other_countries)
-                report_lines.append(
-                    f'During the week of {date_range}, most of your emails originated from {main_country}, '
-                    f'with additional traffic detected from {country_list}.'
-                )
-            elif date_range:
-                report_lines.append(
-                    f'During the week of {date_range}, your emails originated from {main_country}.'
-                )
+            total_emails = sum(count for _, count in sorted_countries)
+            for country, count in sorted_countries[:5]:  # Show top 5 countries
+                percentage = (count / total_emails) * 100
+                report_lines.append(f"  - {country}: {count:,} emails ({percentage:.1f}%)")
         
-        # Add any identified misconfigurations or recommendations
         if self.combined_results['misconfigurations']:
             report_lines.extend([
                 "",
-                "Recommendations:",
+                "System-wide Recommendations:",
                 *[f"- {issue}" for issue in self.combined_results['misconfigurations']]
             ])
         
-        logger.debug("Report generation complete")
         return "\n".join(report_lines)
 
 def process_dmarc_report(report_data: Dict[str, Any], report_dir: str, analyzer: 'DMARCAnalyzer') -> None:
@@ -815,33 +889,44 @@ def process_dmarc_report(report_data: Dict[str, Any], report_dir: str, analyzer:
 
 def save_combined_report(base_dir: str, analyzer: 'DMARCAnalyzer') -> None:
     """
-    Save final combined report and analysis results
+    Save final combined report and domain-specific reports
     
-    Creates both a human-readable text report and a JSON file
-    containing detailed analysis results.
+    Creates a directory structure:
+    base_dir/
+    ├── combined_results/
+    │   ├── combined_report.txt
+    │   └── combined_analysis.json
+    └── domain_reports/
+        ├── example.com/
+        │   ├── report.txt
+        │   └── analysis.json
+        └── another-domain.com/
+            ├── report.txt
+            └── analysis.json
     
     Args:
         base_dir: Base directory for saving reports
         analyzer: DMARCAnalyzer instance containing analysis results
     """
-    logger.info(f"\nSaving combined report to directory: {base_dir}")
+    logger.info(f"\nSaving reports to directory: {base_dir}")
     try:
-        # Create directory for combined results
+        # Create directories for combined and domain-specific results
         combined_dir = os.path.join(base_dir, 'combined_results')
+        domain_dir = os.path.join(base_dir, 'domain_reports')
         os.makedirs(combined_dir, exist_ok=True)
+        os.makedirs(domain_dir, exist_ok=True)
         
-        # Generate and save human-readable report
+        # Save combined report
         logger.debug("Generating combined report")
-        report_text = analyzer.generate_combined_report()
+        combined_report_text = analyzer.generate_combined_report()
         
-        report_path = os.path.join(combined_dir, 'combined_report.txt')
-        logger.debug(f"Saving report to: {report_path}")
-        with open(report_path, 'w') as f:
-            f.write(report_text)
+        combined_report_path = os.path.join(combined_dir, 'combined_report.txt')
+        logger.debug(f"Saving combined report to: {combined_report_path}")
+        with open(combined_report_path, 'w') as f:
+            f.write(combined_report_text)
         
-        # Prepare analysis results for JSON serialization
-        logger.debug("Preparing results for JSON serialization")
-        results_dict = {
+        # Save combined analysis results as JSON
+        combined_results_dict = {
             **analyzer.combined_results,
             'legitimate_systems': dict(analyzer.combined_results['legitimate_systems']),
             'countries': dict(analyzer.combined_results['countries']),
@@ -854,20 +939,65 @@ def save_combined_report(base_dir: str, analyzer: 'DMARCAnalyzer') -> None:
             }
         }
         
-        # Save detailed analysis results as JSON
-        analysis_path = os.path.join(combined_dir, 'combined_analysis.json')
-        logger.debug(f"Saving analysis results to: {analysis_path}")
-        with open(analysis_path, 'w') as f:
-            json.dump(results_dict, f, indent=2)
+        combined_analysis_path = os.path.join(combined_dir, 'combined_analysis.json')
+        logger.debug(f"Saving combined analysis to: {combined_analysis_path}")
+        with open(combined_analysis_path, 'w') as f:
+            json.dump(combined_results_dict, f, indent=2)
+        
+        # Save domain-specific reports
+        logger.info("Generating domain-specific reports")
+        domain_report_text = analyzer.generate_domain_report()
+        
+        for domain in analyzer.domain_results:
+            # Create domain-specific directory
+            domain_specific_dir = os.path.join(domain_dir, domain)
+            os.makedirs(domain_specific_dir, exist_ok=True)
+            
+            # Save domain report
+            domain_report_path = os.path.join(domain_specific_dir, 'report.txt')
+            logger.debug(f"Saving report for {domain} to: {domain_report_path}")
+            
+            # Extract just this domain's section from the full domain report
+            domain_start = domain_report_text.find(f"Domain: {domain}")
+            if domain_start != -1:
+                next_domain = domain_report_text.find("Domain:", domain_start + 1)
+                if next_domain != -1:
+                    domain_section = domain_report_text[domain_start:next_domain].strip()
+                else:
+                    domain_section = domain_report_text[domain_start:].strip()
+                
+                with open(domain_report_path, 'w') as f:
+                    f.write(domain_section)
+            
+            # Save domain analysis results
+            domain_results_dict = {
+                **analyzer.domain_results[domain],
+                'legitimate_systems': dict(analyzer.domain_results[domain]['legitimate_systems']),
+                'countries': dict(analyzer.domain_results[domain]['countries']),
+                'date_range': {
+                    'start': analyzer.domain_results[domain]['date_range']['start'].isoformat() 
+                        if analyzer.domain_results[domain]['date_range']['start'] else None,
+                    'end': analyzer.domain_results[domain]['date_range']['end'].isoformat() 
+                        if analyzer.domain_results[domain]['date_range']['end'] else None
+                }
+            }
+            
+            domain_analysis_path = os.path.join(domain_specific_dir, 'analysis.json')
+            logger.debug(f"Saving analysis for {domain} to: {domain_analysis_path}")
+            with open(domain_analysis_path, 'w') as f:
+                json.dump(domain_results_dict, f, indent=2)
         
         # Log completion and summary
-        logger.info(f"Combined report saved successfully to: {report_path}")
-        logger.info("\nAnalysis Results Summary:")
-        logger.info("========================")
-        logger.info(report_text)
+        logger.info("Reports saved successfully")
+        logger.info("\nSaved Files:")
+        logger.info(f"- Combined Report: {combined_report_path}")
+        logger.info(f"- Combined Analysis: {combined_analysis_path}")
+        logger.info("Domain Reports:")
+        for domain in analyzer.domain_results:
+            logger.info(f"- {domain}: {os.path.join(domain_dir, domain)}")
         
     except Exception as e:
-        logger.error(f"Error saving combined report: {str(e)}")
+        logger.error(f"Error saving reports: {str(e)}")
         logger.debug(traceback.format_exc())
 
 
