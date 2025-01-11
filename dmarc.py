@@ -243,23 +243,15 @@ def process_email_attachment(attachment_path: str, extracted_dir: str, analyzer:
         else:
             logging.error(f"Failed to extract or find XML from {attachment_path}")
 
-# TODO: this function has to have a lookup and date to know to know exactly where 
-# to stop processing emails - has to always process last X emails till Y date
-def get_last_n_emails(imap: imaplib.IMAP4_SSL, n: int) -> None:
+def get_recent_emails(imap: imaplib.IMAP4_SSL, days: int = 7) -> None:
     """
-    Retrieve and process the most recent emails from inbox
-    
-    Main processing workflow:
-    1. Creates necessary directories
-    2. Fetches recent emails
-    3. Extracts and processes attachments
-    4. Generates combined report
+    Retrieve and process emails from the last specified number of days
     
     Args:
         imap: Active IMAP connection
-        n: Number of recent emails to process
+        days: Number of days to look back (default: 7)
     """
-    logging.info(f"Starting to fetch last {n} emails")
+    logging.info(f"Starting to fetch emails from last {days} days")
     
     # Set up directory structure
     email_dir = "downloaded_emails"
@@ -270,27 +262,28 @@ def get_last_n_emails(imap: imaplib.IMAP4_SSL, n: int) -> None:
     dmarc_analyzer = DMARCAnalyzer()
     logging.debug("Initialized DMARCAnalyzer")
 
+    # Calculate date range
+    date_since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%d-%b-%Y")
+    search_criterion = f'(SINCE "{date_since}")'
+    logging.debug(f"Searching for emails since: {date_since}")
+
     # Select and access inbox
     imap.select('INBOX')
     logging.debug("Selected INBOX")
 
-    # Fetch email IDs and process most recent ones
-    _, messages = imap.search(None, 'ALL')
+    # Fetch email IDs within date range
+    _, messages = imap.search(None, search_criterion)
     email_ids = messages[0].split()
     total_emails = len(email_ids)
-    logging.debug(f"Found {total_emails} total emails")
-    
-    last_n_emails = email_ids[-n:] if len(email_ids) > n else email_ids
-    logging.info(f"Processing {len(last_n_emails)} emails")
+    logging.info(f"Found {total_emails} emails within date range")
 
     # Process each email
-    for i, email_id in enumerate(reversed(last_n_emails), 1):
+    for i, email_id in enumerate(email_ids, 1):
         try:
             email_id_str = email_id.decode('utf-8')
-            logging.info(f"Processing email {i}/{n} (ID: {email_id_str})")
+            logging.info(f"Processing email {i}/{total_emails} (ID: {email_id_str})")
             
             # Fetch email content
-            logging.debug(f"Fetching email content for ID: {email_id_str}")
             _, msg_data = imap.fetch(email_id_str, '(RFC822)')
             if not msg_data or not msg_data[0]:
                 logging.error(f"Failed to fetch email {i}")
@@ -311,27 +304,7 @@ def get_last_n_emails(imap: imaplib.IMAP4_SSL, n: int) -> None:
             os.makedirs(extracted_dir, exist_ok=True)
             logging.debug(f"Created directories for email {i}")
             
-            # Handle multipart emails and process attachments
-            if email_message.is_multipart():
-                logging.debug("Processing multipart email")
-                for part in email_message.walk():
-                    if part.get_content_maintype() == 'multipart':
-                        continue
-                        
-                    filename = part.get_filename()
-                    if filename:
-                        logging.debug(f"Processing attachment: {filename}")
-                        # Clean filename of potentially problematic characters
-                        filename = "".join(c for c in filename if c.isalnum() or c in '._- ')
-                        filepath = os.path.join(attachments_dir, filename)
-                        
-                        # Save and process attachment
-                        with open(filepath, 'wb') as f:
-                            f.write(part.get_payload(decode=True))
-                        logging.debug(f"Saved attachment to: {filepath}")
-                            
-                        process_email_attachment(filepath, extracted_dir, dmarc_analyzer)
-            
+            process_email_content(email_message, attachments_dir, extracted_dir, dmarc_analyzer, days)
             logging.info(f"Successfully processed email {i}")
             
         except Exception as e:
@@ -342,15 +315,125 @@ def get_last_n_emails(imap: imaplib.IMAP4_SSL, n: int) -> None:
     logging.info("Saving combined report")
     save_combined_report(email_dir, dmarc_analyzer)
 
-# TODO: this should run routinely one time on Sunday (cron job?) and connect 
-# to the database which has configuration information
+def process_email_content(email_message: email.message.Message, attachments_dir: str, 
+                         extracted_dir: str, analyzer: DMARCAnalyzer, days: int) -> None:
+    """
+    Process email content and filter DMARC reports by date range
+    
+    Args:
+        email_message: Email message object
+        attachments_dir: Directory for saving attachments
+        extracted_dir: Directory for extracted files
+        analyzer: DMARCAnalyzer instance
+        days: Number of days to look back
+    """
+    if email_message.is_multipart():
+        logging.debug("Processing multipart email")
+        for part in email_message.walk():
+            if part.get_content_maintype() == 'multipart':
+                continue
+                
+            filename = part.get_filename()
+            if filename:
+                logging.debug(f"Processing attachment: {filename}")
+                # Clean filename
+                filename = "".join(c for c in filename if c.isalnum() or c in '._- ')
+                filepath = os.path.join(attachments_dir, filename)
+                
+                # Save attachment
+                with open(filepath, 'wb') as f:
+                    f.write(part.get_payload(decode=True))
+                logging.debug(f"Saved attachment to: {filepath}")
+                
+                if is_recent_dmarc_report(filepath, extracted_dir, days):
+                    process_email_attachment(filepath, extracted_dir, analyzer)
+                else:
+                    logging.info(f"Skipping {filename} - outside date range")
+
+def is_recent_dmarc_report(filepath: str, extract_dir: str, days: int) -> bool:
+    """
+    Check if DMARC report is within specified date range
+    
+    Args:
+        filepath: Path to the compressed report file
+        extract_dir: Directory for extraction
+        days: Number of days to look back
+    
+    Returns:
+        bool: True if report is within date range, False otherwise
+    """
+    xml_path = None
+    try:
+        # Extract file if compressed
+        if filepath.endswith(('.zip', '.gz')):
+            xml_path = extract_compressed_file(filepath, extract_dir)
+            if not xml_path:
+                return False
+        else:
+            xml_path = filepath
+
+        # Parse XML to check date range
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        
+        # Get report date range
+        metadata = root.find("report_metadata")
+        if metadata is None:
+            return False
+            
+        date_range = metadata.find("date_range")
+        if date_range is None:
+            return False
+            
+        begin_elem = date_range.find("begin")
+        end_elem = date_range.find("end")
+        if begin_elem is None or end_elem is None:
+            return False
+            
+        # Convert Unix timestamps to UTC datetime objects
+        try:
+            report_begin = datetime.datetime.fromtimestamp(
+                int(begin_elem.text), 
+                tz=datetime.timezone.utc
+            )
+            report_end = datetime.datetime.fromtimestamp(
+                int(end_elem.text), 
+                tz=datetime.timezone.utc
+            )
+        except (ValueError, TypeError):
+            logging.error("Invalid timestamp format in DMARC report")
+            return False
+
+        # Calculate cutoff date in UTC
+        cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+        
+        # Report is recent if either:
+        # 1. Report begin date is within our window
+        # 2. Report end date is within our window
+        is_recent = (report_begin >= cutoff_date) or (report_end >= cutoff_date)
+        
+        return is_recent
+        
+    except Exception as e:
+        logging.error(f"Error checking report date: {str(e)}", exc_info=True)
+        return False
+        
+    finally:
+        # Clean up temporary XML file if it was extracted
+        if xml_path and xml_path != filepath:
+            try:
+                os.remove(xml_path)
+                logging.debug(f"Cleaned up temporary XML file: {xml_path}")
+            except Exception as e:
+                logging.warning(f"Failed to clean up XML file {xml_path}: {str(e)}")
+
 # Main execution block
 if __name__ == "__main__":
     logging.info("=== Starting DMARC report processing ===")
     imap = connect_to_email()
     if imap:
         try:
-            get_last_n_emails(imap, 100)  # Process the last 20 emails
+            get_recent_emails(imap, days=1)  # Process emails from last 7 days
         finally:
             imap.logout()
             logging.info("Logged out of IMAP server")
