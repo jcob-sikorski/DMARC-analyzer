@@ -1,6 +1,7 @@
 # Standard library and third-party imports for core functionality
 from dotenv import load_dotenv  # For loading environment variables
 import os  # For file and directory operations
+import shutil
 import imaplib  # For IMAP email access
 import email  # For email parsing
 from email.header import decode_header  # For decoding email headers
@@ -12,6 +13,10 @@ from typing import Dict, Any, Optional  # Type hints
 from analyzer import DMARCAnalyzer, process_dmarc_report, save_combined_report  # Custom DMARC analysis
 import logging  # For application logging
 import argparse
+import functools
+import time
+import socket
+import ssl
 
 # TODO: write the functionality to email the reports to clients automatically
 
@@ -34,6 +39,33 @@ imaplib.Debug = 4
 # Load environment variables from .env file
 load_dotenv()
 logging.info("Environment variables loaded")
+
+def log_timing(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # Get start time
+        start_time = time.time()
+        
+        # Execute the function
+        result = func(*args, **kwargs)
+        
+        # Calculate elapsed time
+        end_time = time.time()
+        elapsed = end_time - start_time
+        
+        # Format current time as HH:MM.SS
+        current_time = datetime.datetime.fromtimestamp(end_time)
+        formatted_time = current_time.strftime("%H:%M.%S")
+        
+        # Add milliseconds to the formatted time
+        ms = int((elapsed % 1) * 100)
+        formatted_time = f"{formatted_time}.{ms:02d}"
+        
+        # Log the timing
+        logging.debug(f"{formatted_time} - Finished {func.__name__}")
+        
+        return result
+    return wrapper
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Process DMARC reports from email')
@@ -185,14 +217,7 @@ def parse_dmarc_report(xml_path: str) -> Dict[str, Any]:
 
 def connect_to_email() -> Optional[imaplib.IMAP4_SSL]:
     """
-    Establish secure IMAP connection to email server
-    
-    Uses environment variables for credentials:
-    - EMAIL_ADDRESS: Email address to connect with
-    - APP_PASSWORD: Application-specific password for authentication
-    
-    Returns:
-        IMAP4_SSL connection object if successful, None if connection fails
+    Establish secure IMAP connection with improved error handling
     """
     logging.info("Attempting to connect to email server")
     
@@ -203,16 +228,36 @@ def connect_to_email() -> Optional[imaplib.IMAP4_SSL]:
     if not email_address or not app_password:
         logging.error("Missing email credentials in environment variables")
         return None
-        
+    
     try:
+        # Set up SSL context with modern security settings
+        context = ssl.create_default_context()
+        context.options |= ssl.OP_NO_SSLv2 | ssl.OP_NO_SSLv3
+        context.verify_mode = ssl.CERT_REQUIRED
+        
+        # Add connection timeout
+        socket.setdefaulttimeout(30)  # 30 second timeout
+        
         logging.debug(f"Connecting to IMAP server: {imap_server}")
-        imap = imaplib.IMAP4_SSL(imap_server)
+        imap = imaplib.IMAP4_SSL(imap_server, ssl_context=context)
+        
         logging.debug(f"Attempting login for: {email_address}")
         imap.login(email_address, app_password)
+        
         logging.info("Successfully connected to email server")
         return imap
+        
+    except (socket.gaierror, socket.timeout) as e:
+        logging.error(f"Network error connecting to server: {str(e)}")
+        return None
+    except ssl.SSLError as e:
+        logging.error(f"SSL error connecting to server: {str(e)}")
+        return None
+    except imaplib.IMAP4.error as e:
+        logging.error(f"IMAP error connecting to server: {str(e)}")
+        return None
     except Exception as e:
-        logging.error(f"Error connecting to email: {str(e)}", exc_info=True)
+        logging.error(f"Unexpected error connecting to email: {str(e)}")
         return None
 
 def process_email_attachment(attachment_path: str, extracted_dir: str, analyzer: DMARCAnalyzer) -> None:
@@ -245,9 +290,10 @@ def process_email_attachment(attachment_path: str, extracted_dir: str, analyzer:
         else:
             logging.error(f"Failed to extract or find XML from {attachment_path}")
 
+@log_timing
 def get_recent_emails(imap: imaplib.IMAP4_SSL, days: int = 7) -> None:
     """
-    Retrieve and process emails from the last specified number of days
+    Retrieve and process emails with enhanced error handling and automatic reconnection.
     
     Args:
         imap: Active IMAP connection
@@ -256,7 +302,7 @@ def get_recent_emails(imap: imaplib.IMAP4_SSL, days: int = 7) -> None:
     logging.info(f"Starting to fetch emails from last {days} days")
     
     # Set up directory structure
-    email_dir = "downloaded_emails"
+    email_dir = "downloaded_emails_test_imap"
     os.makedirs(email_dir, exist_ok=True)
     logging.debug(f"Created directory: {email_dir}")
 
@@ -264,58 +310,119 @@ def get_recent_emails(imap: imaplib.IMAP4_SSL, days: int = 7) -> None:
     dmarc_analyzer = DMARCAnalyzer()
     logging.debug("Initialized DMARCAnalyzer")
 
-    # Calculate date range
-    date_since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%d-%b-%Y")
-    search_criterion = f'(SINCE "{date_since}")'
-    logging.debug(f"Searching for emails since: {date_since}")
+    def reconnect_imap() -> Optional[imaplib.IMAP4_SSL]:
+        """Helper function to establish a new IMAP connection"""
+        try:
+            logging.info("Attempting to reconnect to IMAP server")
+            new_imap = connect_to_email()
+            if new_imap:
+                new_imap.select('INBOX')
+                return new_imap
+        except Exception as e:
+            logging.error(f"Failed to reconnect: {str(e)}")
+        return None
 
-    # Select and access inbox
-    imap.select('INBOX')
-    logging.debug("Selected INBOX")
-
-    # Fetch email IDs within date range
-    _, messages = imap.search(None, search_criterion)
-    email_ids = messages[0].split()
-    total_emails = len(email_ids)
-    logging.info(f"Found {total_emails} emails within date range")
-
-    # Process each email
-    for i, email_id in enumerate(email_ids, 1):
+    def process_single_email(imap_conn: imaplib.IMAP4_SSL, email_id: bytes,
+                           retry_count: int = 0, max_retries: int = 3,
+                           batch_size: int = 10) -> tuple[bool, Optional[imaplib.IMAP4_SSL]]:
+        """
+        Process a single email with retry logic
+        
+        Returns:
+            bool: True if processing succeeded, False otherwise
+        """
         try:
             email_id_str = email_id.decode('utf-8')
-            logging.info(f"Processing email {i}/{total_emails} (ID: {email_id_str})")
+            _, msg_data = imap_conn.fetch(email_id_str, '(RFC822)')
             
-            # Fetch email content
-            _, msg_data = imap.fetch(email_id_str, '(RFC822)')
             if not msg_data or not msg_data[0]:
-                logging.error(f"Failed to fetch email {i}")
-                continue
+                logging.error(f"Failed to fetch email {email_id_str}")
+                return False, imap_conn
 
             email_body = msg_data[0][1]
             email_message = email.message_from_bytes(email_body)
-            logging.debug(f"Email subject: {email_message.get('Subject')}")
             
-            # Create directory structure for this email
+            # Create email-specific directories
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            email_specific_dir = os.path.join(email_dir, f"email_{i}_{timestamp}")
+            email_specific_dir = os.path.join(email_dir, f"email_{email_id_str}_{timestamp}")
             attachments_dir = os.path.join(email_specific_dir, "attachments")
             extracted_dir = os.path.join(email_specific_dir, "extracted")
             
             os.makedirs(email_specific_dir, exist_ok=True)
             os.makedirs(attachments_dir, exist_ok=True)
             os.makedirs(extracted_dir, exist_ok=True)
-            logging.debug(f"Created directories for email {i}")
             
             process_email_content(email_message, attachments_dir, extracted_dir, dmarc_analyzer, days)
-            logging.info(f"Successfully processed email {i}")
+            return True, imap_conn
+            
+        except (imaplib.IMAP4.abort, ssl.SSLError, socket.error) as e:
+            if retry_count < max_retries:
+                logging.warning(f"Connection error, attempt {retry_count + 1}/{max_retries}: {str(e)}")
+                new_imap = reconnect_imap()
+                if new_imap:
+                    return process_single_email(new_imap, email_id, retry_count + 1, max_retries)
+            logging.error(f"Failed to process email after {max_retries} attempts")
+            return False
             
         except Exception as e:
-            logging.error(f"Error processing email {i}: {str(e)}", exc_info=True)
-            continue
+            logging.error(f"Error processing email: {str(e)}")
+            return False
 
-    # Generate final combined report
-    logging.info("Saving combined report")
-    save_combined_report(email_dir, dmarc_analyzer)
+    try:
+        # Calculate date range
+        date_since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%d-%b-%Y")
+        search_criterion = f'(SINCE "{date_since}")'
+        
+        # Select and search inbox with retry logic
+        max_search_retries = 3
+        for attempt in range(max_search_retries):
+            try:
+                imap.select('INBOX')
+                _, messages = imap.search(None, search_criterion)
+                email_ids = messages[0].split()
+                break
+            except (imaplib.IMAP4.abort, ssl.SSLError, socket.error):
+                if attempt < max_search_retries - 1:
+                    logging.warning(f"Search failed, attempt {attempt + 1}/{max_search_retries}")
+                    imap = reconnect_imap()
+                    if not imap:
+                        raise Exception("Failed to reconnect to IMAP server")
+                    continue
+                raise
+        
+        total_emails = len(email_ids)
+        successful_count = 0
+        logging.info(f"Found {total_emails} emails within date range")
+
+        # Process each email, only reconnecting on errors
+        current_connection = imap
+        
+        for i, email_id in enumerate(email_ids, 1):
+            logging.info(f"Processing email {i}/{total_emails} (ID: {email_id.decode('utf-8')})")
+            
+            success, updated_conn = process_single_email(current_connection, email_id)
+            if success:
+                successful_count += 1
+            
+            # Update connection only if we got a new one from error recovery
+            if updated_conn and updated_conn != current_connection:
+                try:
+                    current_connection.logout()
+                except Exception:
+                    pass
+                current_connection = updated_conn
+            
+            # Add a small delay between emails
+            time.sleep(0.2)  # Increased delay to reduce server load
+
+        # Generate final combined report
+        logging.info(f"Successfully processed {successful_count}/{total_emails} emails")
+        logging.info("Saving combined report")
+        save_combined_report(email_dir, dmarc_analyzer)
+
+    except Exception as e:
+        logging.error(f"Fatal error in email processing: {str(e)}")
+        raise
 
 def process_email_content(email_message: email.message.Message, attachments_dir: str, 
                          extracted_dir: str, analyzer: DMARCAnalyzer, days: int) -> None:
@@ -432,6 +539,11 @@ def is_recent_dmarc_report(filepath: str, extract_dir: str, days: int) -> bool:
 # Main execution block
 if __name__ == "__main__":
     args = parse_arguments()
+
+    # if os.path.exists("downloaded_emails"):
+    #     shutil.rmtree("downloaded_emails")
+    #     logging.info("Removed existing downloaded_emails directory")
+
     logging.info("=== Starting DMARC report processing ===")
     imap = connect_to_email()
     if imap:

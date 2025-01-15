@@ -312,58 +312,68 @@ class DMARCAnalyzer:
 
     def categorize_sender(self, ip: str, hostname: str) -> Tuple[str, str]:
         """
-        Categorize email sender based on hostname with enhanced phishing detection.
+        Categorize email sender with enhanced SendGrid detection rules.
         
-        This function implements a comprehensive categorization approach:
-        1. First checks if the hostname is missing or unknown (strong phishing indicator)
-        2. Then checks against known phishing domains
-        3. Validates against legitimate servers
-        4. Checks forwarder and security gateway lists
-        5. If not found in any known good list, marks as potential phishing
+        Special SendGrid classification rules:
+        1. If hostname matches the current domain being analyzed (e.g., mail.example.com)
+        2. If hostname contains sendgrid.net regardless of IP list
+        
+        Other classification follows standard hierarchy:
+        1. Check for missing/unknown hostname (phishing indicator)
+        2. Check against known phishing domains
+        3. Check against legitimate servers
+        4. Check forwarders and security gateways
+        5. Default to potential phishing for unknown systems
         
         Args:
             ip: The IP address of the sender
-            hostname: The hostname to categorize (may be "Unknown" if DNS lookup failed)
-                
+            hostname: The hostname to categorize
+                    
         Returns:
-            tuple: (category, system_name) where:
-                - category is one of: 'legitimate', 'forwarder', 'security_gateway', 
-                                    'phishing', 'potential_phishing'
-                - system_name is the service name or a descriptive label
+            tuple: (category, system_name)
         """
         logger.debug(f"Categorizing sender - IP: {ip}, Hostname: {hostname}")
         
-        # Check for missing or failed DNS lookup - strong phishing indicator
+        # Handle missing or failed DNS lookup
         if hostname == "Unknown" or not hostname:
             logger.warning(f"No valid hostname for IP {ip} - marking as phishing")
             return 'phishing', 'Unknown Sender (No DNS)'
         
         hostname_lower = hostname.lower()
         
-        # First check against known phishing domains
+        # Enhanced SendGrid Detection Rules
+        if hasattr(self, 'current_domain') and self.current_domain:
+            current_domain_lower = self.current_domain.lower()
+            # Rule 1: Hostname matches current domain
+            if current_domain_lower in hostname_lower:
+                logger.info(f"Sender {ip} ({hostname}) matches current domain - categorizing as SendGrid")
+                return 'legitimate', 'SendGrid'
+        
+        # Rule 2: Hostname contains sendgrid.net
+        if 'sendgrid.net' in hostname_lower:
+            logger.info(f"Sender {ip} ({hostname}) contains sendgrid.net - categorizing as SendGrid")
+            return 'legitimate', 'SendGrid'
+        
+        # Standard classification hierarchy
         if any(domain in hostname_lower for domain in PHISHING_SERVERS):
             logger.warning(f"Matched known phishing domain: {hostname}")
             return 'phishing', 'Known Phishing Domain'
         
-        # Then check legitimate servers since they have service name mappings
         for domain, service_name in LEGITIMATE_SERVERS.items():
             if domain in hostname_lower:
                 logger.info(f"Sender {ip} ({hostname}) categorized as legitimate: {service_name}")
                 return 'legitimate', service_name
         
-        # Check forwarders
         for domain in FORWARDER_SERVERS:
             if domain in hostname_lower:
                 logger.info(f"Sender {ip} ({hostname}) categorized as forwarder")
                 return 'forwarder', 'Email Forwarder'
         
-        # Check security gateways
         for domain in SECURITY_GATEWAYS:
             if domain in hostname_lower:
                 logger.info(f"Sender {ip} ({hostname}) categorized as security gateway")
                 return 'security_gateway', 'Security Gateway'
         
-        # If hostname is not in any known good list, mark as potential phishing
         logger.warning(f"Unknown sender {ip} ({hostname}) - marking as potential phishing")
         return 'potential_phishing', 'Unknown System'
 
@@ -471,19 +481,24 @@ class DMARCAnalyzer:
 
     def analyze_authentication(self, record: Dict[str, Any], sender_category: str, system_name: str) -> Tuple[str, Dict[str, bool]]:
         """
-        Enhanced authentication analysis that considers phishing categorization.
+        Enhanced authentication analysis implementing updated requirements.
         
-        This method analyzes authentication results while taking into account:
-        1. Sender categorization (including phishing detection)
-        2. Domain alignment
-        3. Authentication results (DKIM/SPF)
-        4. Known legitimate service exceptions
+        Authentication rules:
+        1. Both SPF and DKIM pass: Mark as "authenticated" with system name
+        2. SPF fail + DKIM pass:
+        - If server is legitimate system: Use system name (e.g., Mailchimp)
+        - If server isn't legitimate system: Mark as "forwarded"
+        3. Both fail:
+        - If in Phishing list: Mark as "phishing"
+        - If in Security Gateway: Mark as "Security Gateway"
+        - If in Legitimate list: Mark as "[System] Misconfigured"
+        - If not recognized: Mark as "phishing"
         
         Args:
             record: DMARC record data
             sender_category: Category from categorize_sender
             system_name: System name from categorize_sender
-                
+                    
         Returns:
             Tuple of (authentication_result, alignment_results)
         """
@@ -493,55 +508,65 @@ class DMARCAnalyzer:
         policy = record.get('policy_evaluated', {})
         auth_results = record.get('auth_results', {})
         
-        # Get DKIM and SPF results from both policy evaluation and auth_results
+        # Get DKIM and SPF results
         dkim_policy = policy.get('dkim', 'fail').lower()
         spf_policy = policy.get('spf', 'fail').lower()
         
-        # Get alignment results
+        # Get alignment results - only needed for some cases
         alignment_results = self.check_alignment(record)
+        
+        # Extract hostname from record for checking against LEGITIMATE_SERVERS
+        source_ip = record.get('source_ip', '')
+        hostname = self.perform_reverse_dns(source_ip) if source_ip else ''
+        hostname_lower = hostname.lower()
         
         # Initialize authentication result
         auth_result = None
         
-        # Enhanced decision logic incorporating phishing detection
-        if sender_category == 'phishing':
-            # Immediately categorize as potential phishing if sender was identified as such
-            auth_result = 'potential_phishing'
-            logger.warning(f"Phishing detected based on sender categorization - IP: {record.get('source_ip')}")
-            
-        elif sender_category == 'potential_phishing':
-            # Also mark as potential phishing if sender was not found in any known good list
-            auth_result = 'potential_phishing'
-            logger.warning(f"Potential phishing - unknown sender not in known good lists")
-            
-        elif system_name in LEGITIMATE_SERVERS.values():
-            # Handle legitimate services
-            if spf_policy == 'fail':
-                if alignment_results['dkim_aligned'] and dkim_policy == 'pass':
-                    auth_result = 'forwarded'
-                else:
-                    auth_result = 'suspicious_legitimate'
+        # Case 1: Both SPF and DKIM pass
+        if spf_policy == 'pass' and dkim_policy == 'pass':
+            if sender_category == 'legitimate':
+                auth_result = system_name  # Use system name directly
+                logger.info(f"Full authentication successful for {system_name}")
             else:
                 auth_result = 'authenticated'
+                logger.info("Full authentication successful for non-system sender")
         
-        elif dkim_policy == 'pass' and spf_policy == 'pass':
-            # Both authentications passed - check alignment
-            if alignment_results['dkim_aligned'] or alignment_results['spf_aligned']:
-                auth_result = 'authenticated'
+        # Case 2: SPF fail but DKIM pass
+        elif spf_policy == 'fail' and dkim_policy == 'pass':
+            # First check if it's a legitimate system
+            if any(domain in hostname_lower for domain in LEGITIMATE_SERVERS):
+                # Use the actual system name from legitimate systems
+                for domain, service in LEGITIMATE_SERVERS.items():
+                    if domain in hostname_lower:
+                        auth_result = service
+                        break
             else:
-                auth_result = 'authentication_mismatch'
-        
-        elif dkim_policy == 'pass' and sender_category == 'forwarder':
-            if alignment_results['dkim_aligned']:
+                # If not in legitimate systems list, mark as forwarded
                 auth_result = 'forwarded'
+        
+        # Case 3: Both SPF and DKIM fail
+        elif spf_policy == 'fail' and dkim_policy == 'fail':
+            if sender_category == 'phishing' or any(domain in hostname_lower for domain in PHISHING_SERVERS):
+                auth_result = 'phishing'
+                logger.warning(f"Phishing attempt detected from: {system_name}")
+            elif sender_category == 'security_gateway':
+                auth_result = 'security_scanned'
+                logger.info(f"Security gateway scan from: {system_name}")
+            elif sender_category == 'legitimate':
+                auth_result = f"{system_name} Misconfigured"
+                logger.warning(f"Misconfigured legitimate system: {system_name}")
             else:
-                auth_result = 'suspicious_forward'
+                auth_result = 'phishing'
+                logger.warning(f"Unknown system marked as phishing: {system_name}")
         
-        elif sender_category == 'security_gateway':
-            auth_result = 'security_scanned'
-        
+        # Case 4: Any other combination
         else:
-            auth_result = 'potential_phishing'
+            if sender_category == 'security_gateway':
+                auth_result = 'security_scanned'
+            else:
+                auth_result = 'potential_phishing'
+            logger.warning(f"Unexpected authentication result combination for {system_name}")
         
         logger.info(f"Authentication result: {auth_result}, Alignment results: {alignment_results}")
         return auth_result, alignment_results
@@ -625,6 +650,9 @@ class DMARCAnalyzer:
             logger.info(f"Processing report for domain: {domain}")
             self.combined_results['domains'].add(domain)
             
+            # Store current domain for SendGrid classification
+            self.current_domain = domain
+            
             # Process report metadata and date range
             begin_time = report_data['report_metadata'].get('date_range_begin')
             end_time = report_data['report_metadata'].get('date_range_end')
@@ -673,16 +701,80 @@ class DMARCAnalyzer:
                     self.domain_results[domain]['potential_phishing'] += count
                     self.combined_results['potential_phishing'] += count
                 
-                if auth_result == 'authentication_mismatch':
-                    recommendation = (
-                        f"Domain alignment issue detected for {system_name}. "
-                        "Consider reviewing DMARC policy configuration."
-                    )
-                    if recommendation not in self.domain_results[domain]['misconfigurations']:
-                        self.domain_results[domain]['misconfigurations'].append(recommendation)
-                    if recommendation not in self.combined_results['misconfigurations']:
-                        self.combined_results['misconfigurations'].append(recommendation)
+            # Clear current domain after processing
+            self.current_domain = None
+            
+        except Exception as e:
+            logger.error(f"Error analyzing report: {str(e)}")
+            logger.debug(traceback.format_exc())
+
+    def analyze_dmarc_report(self, report_data: Dict[str, Any]) -> None:
+        """Analyze a single DMARC report and update both domain-specific and combined statistics"""
+        logger.info("\nStarting DMARC report analysis")
+        
+        try:
+            domain = report_data['policy_published'].get('domain')
+            if not domain:
+                logger.warning("Report missing domain, skipping")
+                return
+            
+            logger.info(f"Processing report for domain: {domain}")
+            self.combined_results['domains'].add(domain)
+            
+            # Store current domain for SendGrid classification
+            self.current_domain = domain
+            
+            # Process report metadata and date range
+            begin_time = report_data['report_metadata'].get('date_range_begin')
+            end_time = report_data['report_metadata'].get('date_range_end')
+            if begin_time and end_time:
+                self.update_date_range(domain, begin_time, end_time)
+            
+            records = report_data.get('records', [])
+            logger.info(f"Processing {len(records)} records for domain {domain}")
+            
+            for record in records:
+                ip = record.get('source_ip')
+                if not ip:
+                    continue
                 
+                count = int(record.get('count', 0))
+                
+                # Update both domain and combined email counts
+                self.domain_results[domain]['total_emails'] += count
+                self.combined_results['total_emails'] += count
+                
+                hostname = self.perform_reverse_dns(ip)
+                sender_category, system_name = self.categorize_sender(ip, hostname)
+                
+                geo_info = self.get_ip_geolocation(ip)
+                self.domain_results[domain]['countries'][geo_info['country']] += count
+                self.combined_results['countries'][geo_info['country']] += count
+                
+                auth_result, alignment_results = self.analyze_authentication(
+                    record, sender_category, system_name
+                )
+                
+                # Update statistics as before...
+                if auth_result == 'authenticated':
+                    self.domain_results[domain]['legitimate_systems'][system_name] += count
+                    self.combined_results['legitimate_systems'][system_name] += count
+                elif auth_result == 'forwarded':
+                    self.domain_results[domain]['forwarded'] += count
+                    self.combined_results['forwarded'] += count
+                elif auth_result in ('suspicious_forward', 'suspicious_legitimate'):
+                    self.domain_results[domain]['suspicious_forwards'] += count
+                    self.combined_results['suspicious_forwards'] += count
+                elif auth_result == 'security_scanned':
+                    self.domain_results[domain]['security_scanned'] += count
+                    self.combined_results['security_scanned'] += count
+                elif auth_result in ('potential_phishing', 'authentication_mismatch'):
+                    self.domain_results[domain]['potential_phishing'] += count
+                    self.combined_results['potential_phishing'] += count
+                
+            # Clear current domain after processing
+            self.current_domain = None
+            
         except Exception as e:
             logger.error(f"Error analyzing report: {str(e)}")
             logger.debug(traceback.format_exc())
