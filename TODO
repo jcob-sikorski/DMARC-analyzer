@@ -32,9 +32,6 @@ If the name of the server is sendgrid,net, but the IP addresses do not match any
 
 
 // gradually test if:
-// - first download all the emails from last 3 days
-// - modify the code to work with already downloaded emails (faster iteration loop)
-// - report for each domain should be saved to individual report not overwrite the same processed_reports/extracted/report.json
 // - fix Error checking report date: not well-formed
 ####
 // 2025-01-15 20:42:21,364 - DEBUG - 20:42.21.56 - Finished get_recent_emails
