@@ -1,34 +1,30 @@
-👉  apply an additional rule:
+👉  apply an additional rule: 
 
-If the name of the server matches the domain name for which the report is generated, the system should be classified as SendGrid.
-If the name of the server is sendgrid,net, but the IP addresses do not match any IPs on the file, the system should be classified as SendGrid. 
+If the name of the server matches the domain name for which the report is generated, the system should be classified as SendGrid. ✅
+If the name of the server is sendgrid,net, but the IP addresses do not match any IPs on the file, the system should be classified as SendGrid. ✅
 
 👉 If SPF fails but DKIM passes and is properly aligned: We mark it as "forwarded"
 
-This is not correct. If SPF fails but DKIM passes and if the server/IP is from the list of Legitimate systems, that's not a forwarder, but the real sends, meaning, you have to put the name of the system, for example Mailchimp, Salesforce, etc. (for example, for nashvillerealestate.com, you will find a lot of emails where DKIM pass and SPF fails, and those emails go from Mandrill). However, if the SPF fails and DKIM passes, but the system isn't under the Legitimate systems list, then it's forwarded. https://shconsult.ing/5Jvtd5Ph
+This is not correct. If SPF fails but DKIM passes and if the server/IP is from the list of Legitimate systems, that's not a forwarder, but the real sends, meaning, you have to put the name of the system, for example Mailchimp, Salesforce, etc. (for example, for nashvillerealestate.com, you will find a lot of emails where DKIM pass and SPF fails, and those emails go from Mandrill). However, if the SPF fails and DKIM passes, but the system isn't under the Legitimate systems list, then it's forwarded. https://shconsult.ing/5Jvtd5Ph ✅
 
-👉 If SPF fails and either DKIM fails or isn't aligned: We mark it as "suspicious_legitimate"
+👉 If SPF fails and either DKIM fails or isn't aligned: We mark it as "suspicious_legitimate" ✅
 
-If both SPF and DKIM fail, and the server/IP is on the Phishing systems list, mark as phishing.
-if both SPF and DKIM fail, and the server/IP is on the Security Gateway list, mark as Security Gateway
-if both SPF and DKIM fail, and the server/IP are not recognized, mark as phishing. 
-If both SPF and DKIM fail, and the server/IP is on the Legitimate list, mark as [System] Micsonfigured. For example, Mailchimp Misconfigured or Sendgrid Miconfigured. 
+If both SPF and DKIM fail, and the server/IP is on the Phishing systems list, mark as phishing. ✅
+if both SPF and DKIM fail, and the server/IP is on the Security Gateway list, mark as Security Gateway ✅
+if both SPF and DKIM fail, and the server/IP are not recognized, mark as phishing. ✅
+If both SPF and DKIM fail, and the server/IP is on the Legitimate list, mark as [System] Micsonfigured. For example, Mailchimp Misconfigured or Sendgrid Miconfigured. ✅
 
-👉 If SPF passes: We mark it as "authenticated"
+👉 If SPF passes: We mark it as "authenticated". We don't have a condition like this. Probably, that was about SPF passes and DKIM fails, but there would not be a scenario like that. ✅
 
-We don't have a condition like this. Probably, that was about SPF passes and DKIM fails, but there would not be a scenario like that.
+ If both SPF and DKIM pass, then please mark as "authenticated" and specify the system's name (i.e. business Gmail, Sendgrid, Follow Up Boss, kvCore, etc.). ✅
 
- If both SPF and DKIM pass, then please mark as "authenticated" and specify the system's name (i.e. business Gmail, Sendgrid, Follow Up Boss, kvCore, etc.).
-
-👉 If neither aligns: We mark it as "authentication_mismatch"
+👉 If neither aligns: We mark it as "authentication_mismatch" ✅
 
 Alignment/misalignment checks are required for internal purposes to be able to identify phishing emails.
 
 Please, add an additional rule to the script (the same I mentioned in the previous email):
-If the name of the server matches the domain name for which the report is generated, the system should be classified as SendGrid.
-If the name of the server is sendgrid,net, but the IP addresses do not match any IPs on the file, the system should be classified as SendGrid. 
-
-👉 Regarding the report's dates - every report has a period of time it's referred to (<date_range> tag) so it would be reasonable not to rely on when the DMARC reports are being received to the dmarc@sh-reports.com account, but rather to rely on the <date_range> tag. Some providers, like Microsoft for outlook, or Godaddy have 48-72 hours delay in report's distribution, so it is possible, when the information about the Monday's sends will be provided on Wednesday (or Thursday), instead of Tuesday.
+If the name of the server matches the domain name for which the report is generated, the system should be classified as SendGrid. ✅
+If the name of the server is sendgrid,net, but the IP addresses do not match any IPs on the file, the system should be classified as SendGrid.  ✅
 
 
 // gradually test if:
@@ -60,5 +56,23 @@ Traceback (most recent call last):
     raise self.abort('socket error: %s' % val)
 imaplib.IMAP4.abort: socket error: EOF occurred in violation of protocol (_ssl.c:2396
 ####
-// - total emails match around the same count as in the system
-// - detailed stats match around
+// - detailed stats match around if not then remove everything and start from scratch and build slowly
+
+8. Check if format of Example Plain-Text Report is the same as in reqs
+
+9. Actionable Insights 
+    ● Misconfigured Systems: 
+        ○ Example: "kvCore needs DKIM setup." 
+    ● Phishing/Spoofing Sources: 
+        ○ Example: "Phishing emails originated from [domain]. Immediate action required."
+    ● Forwarded Emails: 
+        ○ Recognized Forwarders: "15 emails forwarded. No action required."
+        ○ Suspicious Forwarders: "30 emails forwarded through suspicious servers. Monitoring required." 
+    ● General Recommendations: 
+        ○ Ensure proper email configuration for all legitimate systems. 
+        ○ Regularly monitor forwarded emails for unusual activity. 
+        ○ Enable strong DMARC policies to block phishing.
+
+10. Properly handle edge cases and inconsistencies. (check errors in log and handle them)
+
+11.  Week and country list are variable parameters based on the DMARC data. 

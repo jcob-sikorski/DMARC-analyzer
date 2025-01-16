@@ -228,7 +228,7 @@ class DMARCAnalyzer:
             'legitimate_systems': defaultdict(int),
             'forwarded': 0,
             'suspicious_forwards': 0,
-            'potential_phishing': 0,
+            'phishing': 0,
             'security_scanned': 0,
             'countries': defaultdict(int),
             'date_range': {
@@ -244,7 +244,7 @@ class DMARCAnalyzer:
             'legitimate_systems': defaultdict(int),
             'forwarded': 0,
             'suspicious_forwards': 0,
-            'potential_phishing': 0,
+            'phishing': 0,
             'security_scanned': 0,
             'countries': defaultdict(int),
             'domains': set(),
@@ -375,7 +375,7 @@ class DMARCAnalyzer:
                 return 'security_gateway', 'Security Gateway'
         
         logger.warning(f"Unknown sender {ip} ({hostname}) - marking as potential phishing")
-        return 'potential_phishing', 'Unknown System'
+        return 'phishing', 'Unknown System'
 
     def check_alignment(self, record: Dict[str, Any]) -> Dict[str, bool]:
         """
@@ -481,24 +481,33 @@ class DMARCAnalyzer:
 
     def analyze_authentication(self, record: Dict[str, Any], sender_category: str, system_name: str) -> Tuple[str, Dict[str, bool]]:
         """
-        Enhanced authentication analysis implementing updated requirements.
+        Authentication analysis implementing all specified requirements exactly.
         
-        Authentication rules:
-        1. Both SPF and DKIM pass: Mark as "authenticated" with system name
-        2. SPF fail + DKIM pass:
-        - If server is legitimate system: Use system name (e.g., Mailchimp)
-        - If server isn't legitimate system: Mark as "forwarded"
-        3. Both fail:
-        - If in Phishing list: Mark as "phishing"
-        - If in Security Gateway: Mark as "Security Gateway"
-        - If in Legitimate list: Mark as "[System] Misconfigured"
-        - If not recognized: Mark as "phishing"
+        Core authentication rules:
+        1. SendGrid special cases:
+            - If hostname matches current domain: Classify as SendGrid
+            - If hostname contains sendgrid.net: Classify as SendGrid
+        
+        2. DKIM Pass + SPF Fail cases:
+            - For Outlook/Google: Always mark as forwarded
+            - For Legitimate List + DKIM aligned: Use system name (e.g., Mailchimp)
+            - For Forwarder List: Mark as forwarded
+            - For unrecognized: Mark as suspicious forward
+        
+        3. Both Fail or DKIM not aligned + SPF fail:
+            - For Phishing List: Mark as phishing
+            - For Security Gateway: Mark as security scanned
+            - For Legitimate List: Mark as "[System] Misconfigured"
+            - For unrecognized: Mark as phishing
+        
+        4. Both Pass:
+            - Mark as authenticated with system name
         
         Args:
             record: DMARC record data
             sender_category: Category from categorize_sender
             system_name: System name from categorize_sender
-                    
+            
         Returns:
             Tuple of (authentication_result, alignment_results)
         """
@@ -506,16 +515,13 @@ class DMARCAnalyzer:
         
         # Extract authentication results
         policy = record.get('policy_evaluated', {})
-        auth_results = record.get('auth_results', {})
-        
-        # Get DKIM and SPF results
         dkim_policy = policy.get('dkim', 'fail').lower()
         spf_policy = policy.get('spf', 'fail').lower()
         
-        # Get alignment results - only needed for some cases
+        # Get alignment results - critical for categorization
         alignment_results = self.check_alignment(record)
         
-        # Extract hostname from record for checking against LEGITIMATE_SERVERS
+        # Extract hostname for SendGrid and special case checking
         source_ip = record.get('source_ip', '')
         hostname = self.perform_reverse_dns(source_ip) if source_ip else ''
         hostname_lower = hostname.lower()
@@ -523,120 +529,58 @@ class DMARCAnalyzer:
         # Initialize authentication result
         auth_result = None
         
-        # Case 1: Both SPF and DKIM pass
-        if spf_policy == 'pass' and dkim_policy == 'pass':
-            if sender_category == 'legitimate':
-                auth_result = system_name  # Use system name directly
-                logger.info(f"Full authentication successful for {system_name}")
-            else:
-                auth_result = 'authenticated'
-                logger.info("Full authentication successful for non-system sender")
+        # SendGrid special cases
+        if hasattr(self, 'current_domain') and self.current_domain:
+            current_domain_lower = self.current_domain.lower()
+            if (current_domain_lower in hostname_lower or 
+                'sendgrid.net' in hostname_lower):
+                return 'SendGrid', alignment_results
         
-        # Case 2: SPF fail but DKIM pass
-        elif spf_policy == 'fail' and dkim_policy == 'pass':
-            # First check if it's a legitimate system
-            if any(domain in hostname_lower for domain in LEGITIMATE_SERVERS):
-                # Use the actual system name from legitimate systems
-                for domain, service in LEGITIMATE_SERVERS.items():
-                    if domain in hostname_lower:
-                        auth_result = service
-                        break
-            else:
-                # If not in legitimate systems list, mark as forwarded
+        # Case 1: DKIM Pass, SPF Fail
+        if dkim_policy == 'pass' and spf_policy == 'fail':
+            # Special case: Outlook/Google always indicates forwarding
+            if any(domain in hostname_lower for domain in ['outlook.com', 'google.com']):
                 auth_result = 'forwarded'
-        
-        # Case 3: Both SPF and DKIM fail
-        elif spf_policy == 'fail' and dkim_policy == 'fail':
-            if sender_category == 'phishing' or any(domain in hostname_lower for domain in PHISHING_SERVERS):
+            # For legitimate systems with aligned DKIM, use system name
+            elif alignment_results['dkim_aligned']:
+                if sender_category == 'legitimate':
+                    auth_result = system_name
+                elif sender_category == 'forwarder':
+                    auth_result = 'forwarded'
+                else:
+                    auth_result = 'suspicious_forward'
+            else:
+                auth_result = 'suspicious_forward'
+                
+        # Case 2: SPF fail and either DKIM fails or isn't aligned
+        elif (dkim_policy == 'fail' or not alignment_results['dkim_aligned']) and spf_policy == 'fail':
+            auth_result = 'suspicious_legitimate'
+                
+        # Case 3: Both Fail
+        elif dkim_policy == 'fail' and spf_policy == 'fail':
+            if sender_category == 'phishing':
                 auth_result = 'phishing'
-                logger.warning(f"Phishing attempt detected from: {system_name}")
             elif sender_category == 'security_gateway':
                 auth_result = 'security_scanned'
-                logger.info(f"Security gateway scan from: {system_name}")
             elif sender_category == 'legitimate':
                 auth_result = f"{system_name} Misconfigured"
-                logger.warning(f"Misconfigured legitimate system: {system_name}")
             else:
                 auth_result = 'phishing'
-                logger.warning(f"Unknown system marked as phishing: {system_name}")
-        
-        # Case 4: Any other combination
-        else:
-            if sender_category == 'security_gateway':
-                auth_result = 'security_scanned'
+                
+        # Case 4: Both Pass
+        elif dkim_policy == 'pass' and spf_policy == 'pass':
+            if sender_category == 'legitimate':
+                auth_result = system_name  # Use specific system name
             else:
-                auth_result = 'potential_phishing'
-            logger.warning(f"Unexpected authentication result combination for {system_name}")
-        
+                auth_result = 'authenticated'
+                
+        # Case 5: Any other combination is a mismatch
+        else:
+            auth_result = 'authentication_mismatch'
+            
         logger.info(f"Authentication result: {auth_result}, Alignment results: {alignment_results}")
         return auth_result, alignment_results
 
-    def update_alignment_statistics(self, auth_result: str, alignment_results: Dict[str, bool]) -> None:
-        """
-        Update internal alignment statistics for monitoring and analysis.
-        
-        These statistics help identify patterns and potential issues with
-        email authentication configuration, though they aren't included
-        in client-facing reports.
-        
-        Args:
-            auth_result: Result of authentication analysis
-            alignment_results: Results of domain alignment checks
-        """
-        # Track alignment statistics internally
-        if not hasattr(self, 'alignment_stats'):
-            self.alignment_stats = {
-                'total_checked': 0,
-                'spf_aligned': 0,
-                'dkim_aligned': 0,
-                'both_aligned': 0,
-                'alignment_issues': {
-                    'authentication_mismatch': 0,
-                    'suspicious_legitimate': 0
-                }
-            }
-        
-        self.alignment_stats['total_checked'] += 1
-        
-        if alignment_results['spf_aligned']:
-            self.alignment_stats['spf_aligned'] += 1
-        if alignment_results['dkim_aligned']:
-            self.alignment_stats['dkim_aligned'] += 1
-        if alignment_results['spf_aligned'] and alignment_results['dkim_aligned']:
-            self.alignment_stats['both_aligned'] += 1
-        
-        # Track specific alignment-related issues
-        if auth_result in ('authentication_mismatch', 'suspicious_legitimate'):
-            self.alignment_stats['alignment_issues'][auth_result] += 1
-
-    def update_date_range(self, domain: str, begin_timestamp: str, end_timestamp: str) -> None:
-        """Update the analysis date range for both domain-specific and combined results"""
-        logger.debug(f"Updating date range for domain {domain} - Begin: {begin_timestamp}, End: {end_timestamp}")
-        try:
-            begin_date = datetime.fromtimestamp(int(begin_timestamp))
-            end_date = datetime.fromtimestamp(int(end_timestamp))
-            
-            # Update domain-specific date range
-            current_start = self.domain_results[domain]['date_range']['start']
-            current_end = self.domain_results[domain]['date_range']['end']
-            
-            if current_start is None or begin_date < current_start:
-                self.domain_results[domain]['date_range']['start'] = begin_date
-            if current_end is None or end_date > current_end:
-                self.domain_results[domain]['date_range']['end'] = end_date
-            
-            # Update combined date range
-            if (self.combined_results['date_range']['start'] is None or 
-                begin_date < self.combined_results['date_range']['start']):
-                self.combined_results['date_range']['start'] = begin_date
-            if (self.combined_results['date_range']['end'] is None or 
-                end_date > self.combined_results['date_range']['end']):
-                self.combined_results['date_range']['end'] = end_date
-                
-        except (ValueError, TypeError) as e:
-            logger.error(f"Error updating date range: {str(e)}")
-            logger.debug(traceback.format_exc())
-
     def analyze_dmarc_report(self, report_data: Dict[str, Any]) -> None:
         """Analyze a single DMARC report and update both domain-specific and combined statistics"""
         logger.info("\nStarting DMARC report analysis")
@@ -652,12 +596,6 @@ class DMARCAnalyzer:
             
             # Store current domain for SendGrid classification
             self.current_domain = domain
-            
-            # Process report metadata and date range
-            begin_time = report_data['report_metadata'].get('date_range_begin')
-            end_time = report_data['report_metadata'].get('date_range_end')
-            if begin_time and end_time:
-                self.update_date_range(domain, begin_time, end_time)
             
             records = report_data.get('records', [])
             logger.info(f"Processing {len(records)} records for domain {domain}")
@@ -683,24 +621,34 @@ class DMARCAnalyzer:
                 auth_result, alignment_results = self.analyze_authentication(
                     record, sender_category, system_name
                 )
-                
-                # Update both domain and combined statistics
+
                 if auth_result == 'authenticated':
                     self.domain_results[domain]['legitimate_systems'][system_name] += count
                     self.combined_results['legitimate_systems'][system_name] += count
                 elif auth_result == 'forwarded':
                     self.domain_results[domain]['forwarded'] += count
                     self.combined_results['forwarded'] += count
-                elif auth_result in ('suspicious_forward', 'suspicious_legitimate'):
+                elif auth_result in ('suspicious_forward'):
                     self.domain_results[domain]['suspicious_forwards'] += count
                     self.combined_results['suspicious_forwards'] += count
                 elif auth_result == 'security_scanned':
                     self.domain_results[domain]['security_scanned'] += count
                     self.combined_results['security_scanned'] += count
-                elif auth_result in ('potential_phishing', 'authentication_mismatch'):
-                    self.domain_results[domain]['potential_phishing'] += count
-                    self.combined_results['potential_phishing'] += count
+                elif auth_result in ('phishing'):
+                    self.domain_results[domain]['phishing'] += count
+                    self.combined_results['phishing'] += count
+                    self.track_phishing_source(hostname, count, domain)
+
+                # Analyze misconfigurations
+                misconfigurations = self.analyze_misconfigurations(record, system_name)
+                if misconfigurations:
+                    self.domain_results[domain]['misconfigurations'].extend(misconfigurations)
+                    self.combined_results['misconfigurations'].extend(misconfigurations)
                 
+            # Generate recommendations after processing all records
+            recommendations = self.generate_recommendations(self.domain_results[domain])
+            self.domain_results[domain]['recommendations'] = recommendations
+
             # Clear current domain after processing
             self.current_domain = None
             
@@ -708,76 +656,152 @@ class DMARCAnalyzer:
             logger.error(f"Error analyzing report: {str(e)}")
             logger.debug(traceback.format_exc())
 
-    def analyze_dmarc_report(self, report_data: Dict[str, Any]) -> None:
-        """Analyze a single DMARC report and update both domain-specific and combined statistics"""
-        logger.info("\nStarting DMARC report analysis")
+    def analyze_misconfigurations(self, record: Dict[str, Any], system_name: str) -> List[str]:
+        """
+        Analyze authentication records to identify specific system misconfigurations.
         
-        try:
-            domain = report_data['policy_published'].get('domain')
-            if not domain:
-                logger.warning("Report missing domain, skipping")
-                return
+        Returns detailed information about what needs to be fixed, following the format:
+        "[System Name] needs [specific setup]"
+        """
+        misconfigurations = []
+        auth_results = record.get('auth_results', {})
+        
+        # Check DKIM setup - explicitly identify system needing DKIM
+        if auth_results.get('dkim') == 'fail':
+            misconfigurations.append(f"{system_name} needs DKIM setup")
+        
+        # Check SPF setup - specify system needing SPF
+        if auth_results.get('spf') == 'fail':
+            misconfigurations.append(f"{system_name} needs SPF configuration")
+        
+        # Check DMARC setup
+        policy = record.get('policy_published', {})
+        if policy.get('p') == 'none':
+            misconfigurations.append("DMARC policy should be strengthened beyond 'none'")
             
-            logger.info(f"Processing report for domain: {domain}")
-            self.combined_results['domains'].add(domain)
-            
-            # Store current domain for SendGrid classification
-            self.current_domain = domain
-            
-            # Process report metadata and date range
-            begin_time = report_data['report_metadata'].get('date_range_begin')
-            end_time = report_data['report_metadata'].get('date_range_end')
-            if begin_time and end_time:
-                self.update_date_range(domain, begin_time, end_time)
-            
-            records = report_data.get('records', [])
-            logger.info(f"Processing {len(records)} records for domain {domain}")
-            
-            for record in records:
-                ip = record.get('source_ip')
-                if not ip:
-                    continue
-                
-                count = int(record.get('count', 0))
-                
-                # Update both domain and combined email counts
-                self.domain_results[domain]['total_emails'] += count
-                self.combined_results['total_emails'] += count
-                
-                hostname = self.perform_reverse_dns(ip)
-                sender_category, system_name = self.categorize_sender(ip, hostname)
-                
-                geo_info = self.get_ip_geolocation(ip)
-                self.domain_results[domain]['countries'][geo_info['country']] += count
-                self.combined_results['countries'][geo_info['country']] += count
-                
-                auth_result, alignment_results = self.analyze_authentication(
-                    record, sender_category, system_name
+        return misconfigurations
+
+    def track_phishing_source(self, hostname: str, count: int, domain: str) -> None:
+        """
+        Track phishing attempts with their source domains for reporting.
+        Maintains a record of which domains are attempting phishing.
+        """
+        if not hasattr(self, 'phishing_sources'):
+            self.phishing_sources = defaultdict(lambda: {
+                'count': 0,
+                'target_domains': set()
+            })
+        
+        self.phishing_sources[hostname]['count'] += count
+        self.phishing_sources[hostname]['target_domains'].add(domain)
+
+    def generate_recommendations(self, results: Dict[str, Any]) -> List[str]:
+        """
+        Generate specific, actionable recommendations based on analysis results.
+        Follows the required format for actionable insights.
+        """
+        recommendations = []
+        
+        # Email configuration recommendations
+        if results.get('misconfigurations'):
+            recommendations.extend(results['misconfigurations'])
+        
+        # Forwarding monitoring recommendations
+        if results['suspicious_forwards'] > 0:
+            recommendations.append(
+                "Regularly monitor forwarded emails - "
+                f"{results['suspicious_forwards']} suspicious forwards detected"
+            )
+        
+        # DMARC policy recommendations
+        if results['phishing'] > 0:
+            recommendations.append(
+                "Enable strict DMARC policy - "
+                f"{results['phishing']} phishing attempts blocked"
+            )
+        
+        # System-specific recommendations
+        for system, count in results['legitimate_systems'].items():
+            if system in results.get('failing_systems', []):
+                recommendations.append(f"Review {system} email configuration")
+        
+        return recommendations
+
+    def consolidate_insights(self, results: Dict[str, Any]) -> Dict[str, List[str]]:
+        """Consolidate all insights into appropriate categories"""
+        insights = {
+            'misconfigurations': [],
+            'phishing_sources': [],
+            'forwarding_alerts': [],
+            'recommendations': []
+        }
+        
+        # Add system-specific misconfigurations
+        if results.get('misconfigurations'):
+            insights['misconfigurations'].extend(results['misconfigurations'])
+        
+        # Add phishing sources
+        if hasattr(self, 'phishing_sources'):
+            for domain, info in self.phishing_sources.items():
+                insights['phishing_sources'].append(
+                    f"Phishing emails originated from {domain} "
+                    f"({info['count']} attempts)"
                 )
-                
-                # Update statistics as before...
-                if auth_result == 'authenticated':
-                    self.domain_results[domain]['legitimate_systems'][system_name] += count
-                    self.combined_results['legitimate_systems'][system_name] += count
-                elif auth_result == 'forwarded':
-                    self.domain_results[domain]['forwarded'] += count
-                    self.combined_results['forwarded'] += count
-                elif auth_result in ('suspicious_forward', 'suspicious_legitimate'):
-                    self.domain_results[domain]['suspicious_forwards'] += count
-                    self.combined_results['suspicious_forwards'] += count
-                elif auth_result == 'security_scanned':
-                    self.domain_results[domain]['security_scanned'] += count
-                    self.combined_results['security_scanned'] += count
-                elif auth_result in ('potential_phishing', 'authentication_mismatch'):
-                    self.domain_results[domain]['potential_phishing'] += count
-                    self.combined_results['potential_phishing'] += count
-                
-            # Clear current domain after processing
-            self.current_domain = None
-            
-        except Exception as e:
-            logger.error(f"Error analyzing report: {str(e)}")
-            logger.debug(traceback.format_exc())
+        
+        # Add forwarding alerts
+        if results['suspicious_forwards'] > 0:
+            insights['forwarding_alerts'].append(
+                f"{results['suspicious_forwards']} suspicious forwards detected - "
+                "Enhanced monitoring recommended"
+            )
+        
+        # Add general recommendations
+        if results['phishing'] > 0:
+            insights['recommendations'].append(
+                "Enable strong DMARC policies to block phishing"
+            )
+        
+        return insights
+
+    def format_actionable_insights(self, results: Dict[str, Any]) -> str:
+        """Format actionable insights following requirements exactly"""
+        insights = self.consolidate_insights(results)
+        
+        lines = ["", "Actionable Insights", "=" * 18, ""]
+        
+        # Misconfigured Systems (example: "kvCore needs DKIM setup")
+        if insights['misconfigurations']:
+            lines.extend([
+                "Misconfigured Systems:",
+                *[f"- {issue}" for issue in insights['misconfigurations']],
+                ""
+            ])
+        
+        # Phishing/Spoofing Sources
+        if insights['phishing_sources']:
+            lines.extend([
+                "Phishing/Spoofing Sources:",
+                *[f"- {source}" for source in insights['phishing_sources']],
+                ""
+            ])
+        
+        # Forwarded Emails breakdown
+        lines.extend([
+            "Forwarded Emails Status:",
+            f"- Recognized Forwarders: {results['forwarded']} emails",
+            f"- Suspicious Forwarders: {results['suspicious_forwards']} emails",
+            ""
+        ])
+        
+        # General Recommendations
+        if insights['recommendations']:
+            lines.extend([
+                "General Recommendations:",
+                *[f"- {rec}" for rec in insights['recommendations']],
+                ""
+            ])
+        
+        return "\n".join(lines)
 
     def generate_domain_report(self) -> str:
         """Generate a human-readable report with domain-specific breakdowns"""
@@ -824,11 +848,11 @@ class DMARCAnalyzer:
                     "Closer monitoring required."
                 )
             
-            if results['potential_phishing'] > 0:
+            if results['phishing'] > 0:
                 report_lines.extend([
                     "",
                     "- Phishing Attempts:",
-                    f"  - {results['potential_phishing']} phishing emails pretending to come from this domain. "
+                    f"  - {results['phishing']} phishing emails pretending to come from this domain. "
                     "Immediate action required."
                 ])
             
@@ -861,12 +885,10 @@ class DMARCAnalyzer:
                         f'During the week of {date_range}, emails originated from {main_country}.'
                     )
             
-            if results['misconfigurations']:
-                report_lines.extend([
-                    "",
-                    "Recommendations:",
-                    *[f"- {issue}" for issue in results['misconfigurations']]
-                ])
+            # Add actionable insights at the end of each domain's report
+            report_lines.extend(
+                self.format_actionable_insights(results).split('\n')
+            )
             
             report_lines.extend(["", "-" * 80, ""])
         
@@ -913,7 +935,7 @@ class DMARCAnalyzer:
             f"- Total Legitimate Emails: {sum(self.combined_results['legitimate_systems'].values())}",
             f"- Total Forwarded Emails: {total_forwarded}",
             f"- Total Security Scanned: {self.combined_results['security_scanned']}",
-            f"- Total Potential Phishing: {self.combined_results['potential_phishing']}"
+            f"- Total Potential Phishing: {self.combined_results['phishing']}"
         ])
         
         if suspicious_forwards > 0:
@@ -922,11 +944,11 @@ class DMARCAnalyzer:
                 "across all domains. Enhanced monitoring recommended."
             )
         
-        if self.combined_results['potential_phishing'] > 0:
+        if self.combined_results['phishing'] > 0:
             report_lines.extend([
                 "",
                 "Critical Security Alert:",
-                f"- {self.combined_results['potential_phishing']} potential phishing attempts "
+                f"- {self.combined_results['phishing']} potential phishing attempts "
                 "detected across all domains. Immediate investigation required."
             ])
         
@@ -942,13 +964,6 @@ class DMARCAnalyzer:
             for country, count in sorted_countries[:5]:  # Show top 5 countries
                 percentage = (count / total_emails) * 100
                 report_lines.append(f"  - {country}: {count:,} emails ({percentage:.1f}%)")
-        
-        if self.combined_results['misconfigurations']:
-            report_lines.extend([
-                "",
-                "System-wide Recommendations:",
-                *[f"- {issue}" for issue in self.combined_results['misconfigurations']]
-            ])
         
         return "\n".join(report_lines)
 
