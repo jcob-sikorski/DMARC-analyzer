@@ -1,22 +1,6 @@
-// gradually test if:
+// this is a cron job running on Monday 00:30
 
-// - fix Error checking report date: not well-formed
+// host the server on hitme.pl using docker
 
-// 2025-01-15 20:42:21,364 - DEBUG - 20:42.21.56 - Finished get_recent_emails ssl.SSLEOFError: EOF occurred in violation of protocol (_ssl.c:2396)
-
-// - detailed stats match
-
-// - format of Example Plain-Text Report is the same as in reqs
-
-// add Actionable Insights 
-    ● Misconfigured Systems: 
-        ○ Example: "kvCore needs DKIM setup." 
-    ● Phishing/Spoofing Sources: 
-        ○ Example: "Phishing emails originated from [domain]. Immediate action required."
-    ● Forwarded Emails: 
-        ○ Recognized Forwarders: "15 emails forwarded. No action required."
-        ○ Suspicious Forwarders: "30 emails forwarded through suspicious servers. Monitoring required." 
-    ● General Recommendations: 
-        ○ Ensure proper email configuration for all legitimate systems. 
-        ○ Regularly monitor forwarded emails for unusual activity. 
-        ○ Enable strong DMARC policies to block phishing.
+// the make.com automation should then grab generated reports 
+// and send them one by one to each client using the email list

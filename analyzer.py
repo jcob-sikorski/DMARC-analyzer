@@ -50,6 +50,10 @@ import pandas as pd
 # - Debug level enables detailed tracking
 # - Format includes timestamp, log level, and message
 
+# Create the logs directory if it doesn't exist
+log_directory = "logs"
+os.makedirs(log_directory, exist_ok=True)
+
 # Generate unique log filename with timestamp
 log_filename = f'dmarc_analyzer_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
 
@@ -596,42 +600,6 @@ class DMARCAnalyzer:
         except Exception as e:
             logger.error(f"Error analyzing report: {str(e)}")
             logger.debug(traceback.format_exc())
-
-    def consolidate_insights(self, results: Dict[str, Any]) -> Dict[str, List[str]]:
-        """Consolidate all insights into appropriate categories"""
-        insights = {
-            'misconfigurations': [],
-            'phishing_sources': [],
-            'forwarding_alerts': [],
-            'recommendations': []
-        }
-        
-        # Add system-specific misconfigurations
-        if results.get('misconfigurations'):
-            insights['misconfigurations'].extend(results['misconfigurations'])
-        
-        # Add phishing sources
-        if hasattr(self, 'phishing_sources'):
-            for domain, info in self.phishing_sources.items():
-                insights['phishing_sources'].append(
-                    f"Phishing emails originated from {domain} "
-                    f"({info['count']} attempts)"
-                )
-        
-        # Add forwarding alerts
-        if results['suspicious_forwards'] > 0:
-            insights['forwarding_alerts'].append(
-                f"{results['suspicious_forwards']} suspicious forwards detected - "
-                "Enhanced monitoring recommended"
-            )
-        
-        # Add general recommendations
-        if results['phishing'] > 0:
-            insights['recommendations'].append(
-                "Enable strong DMARC policies to block phishing"
-            )
-        
-        return insights
 
     def generate_domain_report(self) -> str:
         """Generate a human-readable report with domain-specific breakdowns"""
