@@ -1,66 +1,14 @@
-👉  apply an additional rule: 
-
-If the name of the server matches the domain name for which the report is generated, the system should be classified as SendGrid. ✅
-If the name of the server is sendgrid,net, but the IP addresses do not match any IPs on the file, the system should be classified as SendGrid. ✅
-
-👉 If SPF fails but DKIM passes and is properly aligned: We mark it as "forwarded"
-
-This is not correct. If SPF fails but DKIM passes and if the server/IP is from the list of Legitimate systems, that's not a forwarder, but the real sends, meaning, you have to put the name of the system, for example Mailchimp, Salesforce, etc. (for example, for nashvillerealestate.com, you will find a lot of emails where DKIM pass and SPF fails, and those emails go from Mandrill). However, if the SPF fails and DKIM passes, but the system isn't under the Legitimate systems list, then it's forwarded. https://shconsult.ing/5Jvtd5Ph ✅
-
-👉 If SPF fails and either DKIM fails or isn't aligned: We mark it as "suspicious_legitimate" ✅
-
-If both SPF and DKIM fail, and the server/IP is on the Phishing systems list, mark as phishing. ✅
-if both SPF and DKIM fail, and the server/IP is on the Security Gateway list, mark as Security Gateway ✅
-if both SPF and DKIM fail, and the server/IP are not recognized, mark as phishing. ✅
-If both SPF and DKIM fail, and the server/IP is on the Legitimate list, mark as [System] Micsonfigured. For example, Mailchimp Misconfigured or Sendgrid Miconfigured. ✅
-
-👉 If SPF passes: We mark it as "authenticated". We don't have a condition like this. Probably, that was about SPF passes and DKIM fails, but there would not be a scenario like that. ✅
-
- If both SPF and DKIM pass, then please mark as "authenticated" and specify the system's name (i.e. business Gmail, Sendgrid, Follow Up Boss, kvCore, etc.). ✅
-
-👉 If neither aligns: We mark it as "authentication_mismatch" ✅
-
-Alignment/misalignment checks are required for internal purposes to be able to identify phishing emails.
-
-Please, add an additional rule to the script (the same I mentioned in the previous email):
-If the name of the server matches the domain name for which the report is generated, the system should be classified as SendGrid. ✅
-If the name of the server is sendgrid,net, but the IP addresses do not match any IPs on the file, the system should be classified as SendGrid.  ✅
-
-
 // gradually test if:
+
 // - fix Error checking report date: not well-formed
-####
-// 2025-01-15 20:42:21,364 - DEBUG - 20:42.21.56 - Finished get_recent_emails
-  42:21.36 > b'HJEN538 LOGOUT'
-Traceback (most recent call last):
-  File "/Users/jakubsiekiera/.pyenv/versions/3.10.10/lib/python3.10/imaplib.py", line 1006, in _command
-    self.send(data + CRLF)
-  File "/Users/jakubsiekiera/.pyenv/versions/3.10.10/lib/python3.10/imaplib.py", line 332, in send
-    self.sock.sendall(data)
-  File "/Users/jakubsiekiera/.pyenv/versions/3.10.10/lib/python3.10/ssl.py", line 1237, in sendall
-    v = self.send(byte_view[count:])
-  File "/Users/jakubsiekiera/.pyenv/versions/3.10.10/lib/python3.10/ssl.py", line 1206, in send
-    return self._sslobj.write(data)
-ssl.SSLEOFError: EOF occurred in violation of protocol (_ssl.c:2396)
 
-During handling of the above exception, another exception occurred:
+// 2025-01-15 20:42:21,364 - DEBUG - 20:42.21.56 - Finished get_recent_emails ssl.SSLEOFError: EOF occurred in violation of protocol (_ssl.c:2396)
 
-Traceback (most recent call last):
-  File "/Users/jakubsiekiera/Desktop/work/upwork/clients/alex-shakhov/dmarc.py", line 553, in <module>
-    imap.logout()
-  File "/Users/jakubsiekiera/.pyenv/versions/3.10.10/lib/python3.10/imaplib.py", line 642, in logout
-    typ, dat = self._simple_command('LOGOUT')
-  File "/Users/jakubsiekiera/.pyenv/versions/3.10.10/lib/python3.10/imaplib.py", line 1230, in _simple_command
-    return self._command_complete(name, self._command(name, *args))
-  File "/Users/jakubsiekiera/.pyenv/versions/3.10.10/lib/python3.10/imaplib.py", line 1008, in _command
-    raise self.abort('socket error: %s' % val)
-imaplib.IMAP4.abort: socket error: EOF occurred in violation of protocol (_ssl.c:2396
-####
-// - detailed stats match around if not then remove everything and start from scratch and build slowly
+// - detailed stats match
 
-8. Check if format of Example Plain-Text Report is the same as in reqs
+// - format of Example Plain-Text Report is the same as in reqs
 
-9. Actionable Insights 
+// add Actionable Insights 
     ● Misconfigured Systems: 
         ○ Example: "kvCore needs DKIM setup." 
     ● Phishing/Spoofing Sources: 
@@ -72,7 +20,3 @@ imaplib.IMAP4.abort: socket error: EOF occurred in violation of protocol (_ssl.c
         ○ Ensure proper email configuration for all legitimate systems. 
         ○ Regularly monitor forwarded emails for unusual activity. 
         ○ Enable strong DMARC policies to block phishing.
-
-10. Properly handle edge cases and inconsistencies. (check errors in log and handle them)
-
-11.  Week and country list are variable parameters based on the DMARC data. 
