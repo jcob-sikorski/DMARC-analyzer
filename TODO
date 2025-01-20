@@ -1,6 +1,0 @@
-// this is a cron job running on Monday 00:30
-
-// host the server on hitme.pl using docker
-
-// the make.com automation should then grab generated reports 
-// and send them one by one to each client using the email list

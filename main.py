@@ -1,38 +1,25 @@
 # Standard library and third-party imports for core functionality
-from dotenv import load_dotenv  # For loading environment variables
 import os  # For file and directory operations
 import imaplib  # For IMAP email access
 import email  # For email parsing
 from email import policy
 from email.header import decode_header  # For decoding email headers
-import datetime  # For timestamp handling
+from datetime import datetime, timedelta  # For timestamp handling
 import xml.etree.ElementTree as ET  # For XML parsing
+import gzip  # For handling gzip compressed files
+import zipfile  # For handling zip archives
 from typing import Dict, Any, Optional  # Type hints
 from analyzer import DMARCAnalyzer, process_dmarc_report, save_reports  # Custom DMARC analysis
 import logging  # For application logging
 import argparse
-import functools
-import time
-import socket
-import ssl
-from glob import glob
-import json
+import shutil
 import sys
-import inspect
 from dotenv import load_dotenv
+from email_sender import send_domain_reports
+import csv
 
 # Load environment variables from .env file
 load_dotenv()
-
-# Set up logging configuration
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('dmarc_processing.log'),
-        logging.StreamHandler()
-    ]
-)
 
 def debug_print_var(var, var_name, logger=None):
     """
@@ -58,8 +45,8 @@ def debug_print_var(var, var_name, logger=None):
         print(debug_info)
 
 def setup_logging():
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = f'dmarc_fetch_{timestamp}.log'
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = f'logs/dmarc_fetch_{timestamp}.log'
     formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
     
     file_handler = logging.FileHandler(log_filename)
@@ -160,7 +147,7 @@ def fetch_dmarc_reports(imap_server, username, password, batch_size=100, days_ba
         if status != 'OK':
             raise Exception("Failed to select DMARC Reports folder")
         
-        date = (datetime.now() - datetime.timedelta(days=days_back)).strftime("%d-%b-%Y")
+        date = (datetime.now() - timedelta(days=days_back)).strftime("%d-%b-%Y")
         debug_print_var(date, 'date', logger)
         
         search_criteria = f'SINCE "{date}"'
@@ -285,7 +272,7 @@ def parse_dmarc_report(file_path: str) -> Dict[str, Any]:
                 "date_range_end": getattr(metadata.find("date_range/end"), "text", "")
             }
             logging.debug(f"Metadata parsed: {report_data['report_metadata']}")
-        # else:
+        else:
             logging.warning("No metadata section found in XML")
         
         # Parse policy published section
@@ -301,7 +288,7 @@ def parse_dmarc_report(file_path: str) -> Dict[str, Any]:
                 "pct": getattr(policy.find("pct"), "text", "")
             }
             logging.debug(f"Policy parsed: {report_data['policy_published']}")
-        # else:
+        else:
             logging.warning("No policy section found in XML")
         
         # Parse records
@@ -338,10 +325,57 @@ def parse_dmarc_report(file_path: str) -> Dict[str, Any]:
     except Exception as e:
         logging.error(f"Error processing XML {file_path}: {str(e)}", exc_info=True)
         return {}
+    
+def extract_compressed_file(file_path: str, extract_dir: str) -> Optional[str]:
+    """
+    Extract DMARC reports from compressed files (ZIP or GZIP)
+    
+    Args:
+        file_path: Path to the compressed file
+        extract_dir: Directory where files should be extracted
+        
+    Returns:
+        Optional[str]: Path to the extracted XML file, or None if extraction fails
+    """
+    logging.info(f"Starting extraction of file: {file_path}")
+    logging.debug(f"Extraction directory: {extract_dir}")
+    
+    try:
+        # Handle ZIP files
+        if file_path.endswith('.zip'):
+            logging.debug("Processing ZIP file")
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                # Find XML files in the archive
+                xml_files = [f for f in zip_ref.namelist() if f.endswith('.xml')]
+                logging.debug(f"Found XML files in ZIP: {xml_files}")
+                
+                if not xml_files:
+                    logging.warning(f"No XML files found in {file_path}")
+                    return None
+                    
+                zip_ref.extractall(extract_dir)
+                extracted_path = os.path.join(extract_dir, xml_files[0])
+                logging.info(f"Successfully extracted ZIP to: {extracted_path}")
+                return extracted_path
+        
+        # Handle GZIP files
+        elif file_path.endswith('.gz'):
+            logging.debug("Processing GZIP file")
+            xml_path = os.path.join(extract_dir, os.path.basename(file_path)[:-3])
+            with gzip.open(file_path, 'rb') as gz:
+                with open(xml_path, 'wb') as xml_file:
+                    xml_file.write(gz.read())
+            logging.info(f"Successfully extracted GZIP to: {xml_path}")
+            return xml_path
+            
+    except Exception as e:
+        logging.error(f"Error extracting {file_path}: {str(e)}", exc_info=True)
+        return None
 
 def process_local_files() -> None:
     """
     Process DMARC report files from local directory with improved directory handling
+    and automatic extraction of compressed files if the extracted folder is empty
     """
     logging.info(f"Starting to process local files")
     
@@ -363,8 +397,41 @@ def process_local_files() -> None:
                     full_path = os.path.join(root, file)
                     xml_files.append(full_path)
 
+        # If no XML files found, try to extract from compressed files
         if not xml_files:
-            # logging.warning(f"No report files found in {extract_dir}")
+            logging.info(f"No XML files found in {extract_dir}, checking for compressed files")
+            
+            # Check both base directory and compressed subdirectory for compressed files
+            check_dirs = [
+                base_path,
+                os.path.join(base_path, "compressed")
+            ]
+            
+            for check_dir in check_dirs:
+                logging.info(f"Checking directory for compressed files: {check_dir}")
+                if not os.path.exists(check_dir):
+                    logging.warning(f"Directory does not exist: {check_dir}")
+                    continue
+                    
+                for root, dirs, files in os.walk(check_dir):
+                    compressed_files = [f for f in files if f.endswith(('.zip', '.gz'))]
+                    logging.info(f"Found {len(compressed_files)} compressed files in {root}")
+                    
+                    for file in compressed_files:
+                        file_path = os.path.join(root, file)
+                        try:
+                            logging.info(f"Attempting to extract: {file_path}")
+                            xml_path = extract_compressed_file(file_path, extract_dir)
+                            if xml_path:
+                                logging.info(f"Successfully extracted to: {xml_path}")
+                                xml_files.append(xml_path)
+                            else:
+                                logging.warning(f"No XML files found in compressed file: {file_path}")
+                        except Exception as e:
+                            logging.error(f"Failed to extract {file_path}: {str(e)}", exc_info=True)
+
+        if not xml_files:
+            logging.warning(f"No report files found in {extract_dir} after extraction attempts")
             return
 
         total_files = len(xml_files)
@@ -382,10 +449,9 @@ def process_local_files() -> None:
                 if report_data:
                     logging.info("Processing parsed DMARC report")
                     process_dmarc_report(report_data, os.path.dirname(file_path), dmarc_analyzer)
-                    pass
+                    successful_count += 1
                 else:
                     logging.error(f"Failed to parse DMARC report from {file_path}")
-                successful_count += 1
             except Exception as e:
                 logging.error(f"Error processing {file_path}: {str(e)}", exc_info=True)
 
@@ -401,17 +467,44 @@ def process_local_files() -> None:
         logging.error(f"Fatal error in file processing: {str(e)}", exc_info=True)
         raise
 
+def create_client_domains_dict(csv_file_path):
+    CLIENT_DOMAINS = {}
+    
+    with open(csv_file_path, 'r') as file:
+        csv_reader = csv.reader(file)
+        # Skip header if it exists
+        # next(csv_reader)  # Uncomment this line if your CSV has headers
+        
+        for row in csv_reader:
+            email = row[0]  # Assuming email is in the first column
+            domain = row[1]  # Assuming domain is in the second column
+            
+            # If email already exists, append the new domain to its list
+            if email in CLIENT_DOMAINS:
+                if domain not in CLIENT_DOMAINS[email]:
+                    CLIENT_DOMAINS[email].append(domain)
+            else:
+                # Create new entry with domain in a list
+                CLIENT_DOMAINS[email] = [domain]
+    
+    return CLIENT_DOMAINS
+
 if __name__ == "__main__":
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description='Fetch DMARC reports from email')
+    parser.add_argument('--days', type=int, default=7,
+                       help='Number of days back to fetch reports (default: 1)')
+
+    # Parse arguments
+    args = parser.parse_args()
+
     # Configuration
     IMAP_SERVER = os.getenv('IMAP_SERVER')
     USERNAME = os.getenv('IMAP_USERNAME')
     PASSWORD = os.getenv('IMAP_PASSWORD')
     
-    # Debug print configuration variables
+    # # Debug print configuration variables
     logger = logging.getLogger(__name__)
-    debug_print_var(IMAP_SERVER, 'IMAP_SERVER', logger)
-    debug_print_var(USERNAME, 'USERNAME', logger)
-    debug_print_var('*' * len(PASSWORD), 'PASSWORD', logger)  # Don't log actual password
     
     try:
         fetch_dmarc_reports(
@@ -419,7 +512,7 @@ if __name__ == "__main__":
             username=USERNAME,
             password=PASSWORD,
             batch_size=100,
-            days_back=7
+            days_back=args.days
         )
     except KeyboardInterrupt:
         print("\nScript interrupted by user")
@@ -435,3 +528,20 @@ if __name__ == "__main__":
     except Exception as e:
         logging.error(f"Processing failed: {str(e)}")
         raise
+
+    CLIENT_DOMAINS = create_client_domains_dict("CLIENT_DOMAINS.csv")
+
+    SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+
+    try:
+        failed_deliveries = send_domain_reports(CLIENT_DOMAINS, SENDGRID_API_KEY)
+
+        if failed_deliveries:
+            logger.error("Some deliveries failed:")
+            for email, domains in failed_deliveries.items():
+                logger.error(f"Failed to send reports for {email}: {', '.join(domains)}")
+        else:
+            logger.info("All reports sent successfully")
+   
+    except Exception as e:
+        logger.error(f"Error in main execution: {e}")

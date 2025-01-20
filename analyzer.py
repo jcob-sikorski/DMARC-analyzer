@@ -55,7 +55,7 @@ log_directory = "logs"
 os.makedirs(log_directory, exist_ok=True)
 
 # Generate unique log filename with timestamp
-log_filename = f'dmarc_analyzer_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+log_filename = f'logs/dmarc_analyzer_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
 
 # Set up logging configuration
 logging.basicConfig(
