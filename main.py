@@ -17,6 +17,10 @@ import sys
 from dotenv import load_dotenv
 from email_sender import send_domain_reports
 import csv
+from pymongo.mongo_client import MongoClient
+from pymongo.server_api import ServerApi
+import json
+import glob
 
 # Load environment variables from .env file
 load_dotenv()
@@ -489,6 +493,7 @@ def create_client_domains_dict(csv_file_path):
     
     return CLIENT_DOMAINS
 
+
 if __name__ == "__main__":
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Fetch DMARC reports from email')
@@ -503,7 +508,7 @@ if __name__ == "__main__":
     USERNAME = os.getenv('IMAP_USERNAME')
     PASSWORD = os.getenv('IMAP_PASSWORD')
     
-    # # Debug print configuration variables
+    # Debug print configuration variables
     logger = logging.getLogger(__name__)
     
     try:
@@ -529,8 +534,76 @@ if __name__ == "__main__":
         logging.error(f"Processing failed: {str(e)}")
         raise
 
-    CLIENT_DOMAINS = create_client_domains_dict("CLIENT_DOMAINS.csv")
+    # MongoDB connection and report insertion
+    logging.info("=== Starting MongoDB report insertion ===")
+    try:
+        # Get MongoDB connection details from environment variables
+        MONGODB_URI = os.getenv('MONGODB_URI')
+        if not MONGODB_URI:
+            raise ValueError("MongoDB URI not found in environment variables")
 
+        client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
+        
+        # Verify connection
+        client.admin.command('ping')
+        logging.info("Successfully connected to MongoDB")
+        
+        # Get database and collection
+        db = client['dmarc']
+        collection = db['reports']
+        
+        # Process and insert reports
+        base_path = "dmarc_reports/domain_reports"
+        if not os.path.exists(base_path):
+            raise FileNotFoundError(f"Base path {base_path} does not exist")
+
+        domain_dirs = glob.glob(os.path.join(base_path, "*"))
+        for domain_dir in domain_dirs:
+            domain = os.path.basename(domain_dir)
+            logging.info(f"Processing domain for MongoDB: {domain}")
+
+            json_path = os.path.join(domain_dir, "analysis.json")
+            txt_path = os.path.join(domain_dir, "report.txt")
+
+            document = {
+                "domain": domain,
+                "date_created": datetime.now()
+            }
+
+            # Read and add JSON report
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as file:
+                        document["report_json"] = json.load(file)
+                except Exception as e:
+                    logging.error(f"Error reading JSON file for {domain}: {e}")
+
+            # Read and add text report
+            if os.path.exists(txt_path):
+                try:
+                    with open(txt_path, 'r', encoding='utf-8') as file:
+                        document["report_txt"] = file.read()
+                except Exception as e:
+                    logging.error(f"Error reading text file for {domain}: {e}")
+
+            # Insert document if it has both reports
+            if "report_json" in document and "report_txt" in document:
+                try:
+                    collection.insert_one(document)
+                    logging.info(f"Successfully inserted MongoDB document for: {domain}")
+                except Exception as e:
+                    logging.error(f"Error inserting MongoDB document for {domain}: {e}")
+            else:
+                logging.warning(f"Skipping MongoDB insertion for {domain}: Missing reports")
+
+        client.close()
+        logging.info("=== MongoDB report insertion completed ===")
+        
+    except Exception as e:
+        logging.error(f"MongoDB operation failed: {e}")
+        raise
+
+    CLIENT_DOMAINS = create_client_domains_dict("CLIENT_DOMAINS.csv")
     SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
     try:
