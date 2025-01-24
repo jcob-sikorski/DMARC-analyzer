@@ -643,7 +643,7 @@ class DMARCAnalyzer:
                 report_lines.extend([
                     "",
                     "- Phishing Attempts:",
-                    f"  - {results['phishing']} phishing emails pretending to come from this domain. "
+                    f"  - {results['phishing']} phishing emails pretending to come from @{domain} email addresses. No action is required due to the enforced policies on the server. Phish emails were blocked and never delivered. "
                     "Immediate action required."
                 ])
             
@@ -655,28 +655,28 @@ class DMARCAnalyzer:
                     "No further action needed."
                 ])
             
-            if results.get('countries'):
-                report_lines.extend(["\nCountry Summary:"])
-                sorted_countries = sorted(
-                    results['countries'].items(),
-                    key=lambda x: x[1],
-                    reverse=True
-                )[:4]  # Get top 4 countries
+            # if results.get('countries'):
+            #     report_lines.extend(["\nCountry Summary:"])
+            #     sorted_countries = sorted(
+            #         results['countries'].items(),
+            #         key=lambda x: x[1],
+            #         reverse=True
+            #     )[:4]  # Get top 4 countries
                 
-                if sorted_countries:
-                    main_country = sorted_countries[0][0]
-                    other_countries = [country for country, _ in sorted_countries[1:]]
+            #     if sorted_countries:
+            #         main_country = sorted_countries[0][0]
+            #         other_countries = [country for country, _ in sorted_countries[1:]]
                     
-                    if other_countries:
-                        country_list = ", and ".join([", ".join(other_countries[:-1]), other_countries[-1]] if len(other_countries) > 1 else other_countries)
-                        report_lines.append(
-                            f"During last week, most of your emails originated from {main_country}, "
-                            f"with additional traffic detected from {country_list}."
-                        )
-                    else:
-                        report_lines.append(
-                            f"During last week, most of your emails originated from {main_country}."
-                        )
+            #         if other_countries:
+            #             country_list = ", and ".join([", ".join(other_countries[:-1]), other_countries[-1]] if len(other_countries) > 1 else other_countries)
+            #             report_lines.append(
+            #                 f"During last week, most of your emails originated from {main_country}, "
+            #                 f"with additional traffic detected from {country_list}."
+            #             )
+            #         else:
+            #             report_lines.append(
+            #                 f"During last week, most of your emails originated from {main_country}."
+            #             )
             
             report_lines.extend(["", "-" * 80, ""])
         
