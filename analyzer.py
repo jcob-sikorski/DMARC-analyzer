@@ -355,8 +355,8 @@ class DMARCAnalyzer:
                 logger.info(f"Sender {ip} ({hostname}) categorized as security gateway")
                 return 'security_gateway', 'Security Gateway'
         
-        logger.warning(f"Unknown sender {ip} ({hostname}) - marking as potential phishing")
-        return 'phishing', 'Unknown System'
+        logger.warning(f"Unknown sender {ip} ({hostname}) - marking as misconfigured")
+        return 'legitimate', hostname
 
     def check_alignment(self, record: Dict[str, Any]) -> Dict[str, bool]:
         """
@@ -547,7 +547,7 @@ class DMARCAnalyzer:
         return auth_result, alignment_results
 
     def analyze_dmarc_report(self, report_data: Dict[str, Any]) -> None:
-        """Analyze a single DMARC report and update both domain-specific statistics"""
+        """Analyze a single DMARC report and update domain-specific statistics"""
         
         logger.info("\nStarting DMARC report analysis")
 
@@ -570,7 +570,7 @@ class DMARCAnalyzer:
                 
                 count = int(record.get('count', 0))
                 
-                # Update both domain email counts
+                # Update domain email counts
                 self.domain_results[domain.lower()]['total_emails'] += count
                 
                 hostname = self.perform_reverse_dns(ip)
@@ -594,7 +594,7 @@ class DMARCAnalyzer:
                 elif auth_result in ('phishing'):
                     self.domain_results[domain.lower()]['phishing'] += count
 
-            # # Clear current domain after processing
+            # Clear current domain after processing
             self.current_domain = None
             
         except Exception as e:
@@ -813,8 +813,8 @@ def save_reports(base_dir: str, analyzer: 'DMARCAnalyzer') -> None:
             analysis_exists = os.path.exists(os.path.join(domain_path, 'analysis.json'))
             logger.info(f"- {domain}:")
             logger.info(f"  Directory: {domain_path}")
-            logger.info(f"  Report: {'✓' if report_exists else '✗'}")
-            logger.info(f"  Analysis: {'✓' if analysis_exists else '✗'}")
+            logger.info(f"  Report: {'success' if report_exists else 'failed'}")
+            logger.info(f"  Analysis: {'success' if analysis_exists else 'failed'}")
             
     except OSError as ose:
         logger.error(f"OS error while saving reports: {str(ose)}")
@@ -822,42 +822,3 @@ def save_reports(base_dir: str, analyzer: 'DMARCAnalyzer') -> None:
     except Exception as e:
         logger.error(f"Unexpected error while saving reports: {str(e)}")
         logger.debug(f"Error details: {traceback.format_exc()}")
-
-# TODO: ask alex if this is the way to go 
-# (google sheet can't be public?) - however this will 
-# result in need of redeeming credentials every week in google api
-# pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
-
-# from google.oauth2.credentials import Credentials
-# from googleapiclient.discovery import build
-# from google.oauth2 import service_account
-
-# def download_legitimate_servers_api():
-#     SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-#     SPREADSHEET_ID = '1yTh7HDf7yoeydtr_fgx54xg_cIkAad6nHRWEwHMKX9c'
-#     RANGE_NAME = 'Sheet1!A:C'  # Adjust range as needed
-    
-#     try:
-#         # Load credentials from service account file
-#         creds = service_account.Credentials.from_service_account_file(
-#             'path/to/service-account-key.json', scopes=SCOPES)
-            
-#         service = build('sheets', 'v4', credentials=creds)
-        
-#         # Call the Sheets API
-#         sheet = service.spreadsheets()
-#         result = sheet.values().get(
-#             spreadsheetId=SPREADSHEET_ID,
-#             range=RANGE_NAME
-#         ).execute()
-        
-#         values = result.get('values', [])
-        
-#         # Convert to dictionary
-#         LEGITIMATE_SERVERS = {row[0]: row[2] for row in values[1:]}  # Skip header row
-        
-#         return LEGITIMATE_SERVERS
-        
-#     except Exception as e:
-#         logger.error(f"Failed to download legitimate servers via API: {str(e)}")
-#         return {}
