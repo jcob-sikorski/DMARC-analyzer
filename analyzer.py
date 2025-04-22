@@ -232,7 +232,7 @@ class DMARCAnalyzer:
             'phishing': 0,
             'security_scanned': 0,
             'countries': defaultdict(int),
-            'misconfigurations': []
+            'misconfigured_systems': defaultdict(int)  # Add this line
         })
 
         logger.debug("Analyzer state reset complete")
@@ -355,8 +355,8 @@ class DMARCAnalyzer:
                 logger.info(f"Sender {ip} ({hostname}) categorized as security gateway")
                 return 'security_gateway', 'Security Gateway'
         
-        logger.warning(f"Unknown sender {ip} ({hostname}) - marking as misconfigured")
-        return 'legitimate', hostname
+        logger.warning(f"Unknown sender {ip} ({hostname}) - marking as unknown")
+        return 'unknown', hostname
 
     def check_alignment(self, record: Dict[str, Any]) -> Dict[str, bool]:
         """
@@ -593,6 +593,8 @@ class DMARCAnalyzer:
                     self.domain_results[domain.lower()]['security_scanned'] += count
                 elif auth_result in ('phishing'):
                     self.domain_results[domain.lower()]['phishing'] += count
+                elif auth_result == 'misconfigured':
+                    self.domain_results[domain.lower()]['misconfigured_systems'][system_name] += count
 
             # Clear current domain after processing
             self.current_domain = None
@@ -615,68 +617,75 @@ class DMARCAnalyzer:
             
             report_lines.extend([
                 f"Domain: {domain}",
-                f"Total Emails Sent: {results['total_emails']:,}",
-                f"Emails Forwarded: {total_forwarded}",
-                f"- Recognized Forwarders: {recognized_forwards} emails",
-                f"- Suspicious Forwarders: {suspicious_forwards} emails",
-                "",
-                "Authentication Results:",
-                "- Legitimate Systems:"
+                f"Total Emails Sent: {results['total_emails']:,}"
             ])
             
-            for system, count in results['legitimate_systems'].items():
-                report_lines.append(f"  - {system}: {count} emails")
-            
-            report_lines.extend([
-                "",
-                "- Forwarded Emails:",
-                f"  - {total_forwarded} emails have been forwarded. No action required."
-            ])
-            
-            if suspicious_forwards > 0:
-                report_lines.append(
-                    f"  - {suspicious_forwards} emails were forwarded via suspicious servers. "
-                    "Closer monitoring required."
-                )
-            
-            if results['phishing'] > 0:
+            # Only add forwarding information if there are forwarded emails
+            if total_forwarded > 0:
                 report_lines.extend([
-                    "",
-                    "- Phishing Attempts:",
-                    f"  - {results['phishing']} phishing emails pretending to come from @{domain} email addresses. No action is required due to the enforced policies on the server. Phish emails were blocked and never delivered. "
-                    "Immediate action required."
+                    f"Emails Forwarded: {total_forwarded}",
+                    f"- Recognized Forwarders: {recognized_forwards} emails",
+                    f"- Suspicious Forwarders: {suspicious_forwards} emails"
                 ])
             
-            if results['security_scanned'] > 0:
-                report_lines.extend([
-                    "",
-                    "- Security Gateway:",
-                    f"  - {results['security_scanned']} emails were scanned by spam filters. "
-                    "No further action needed."
-                ])
+            # Only add Authentication Results if there are any results to show
+            has_auth_results = (results['legitimate_systems'] or 
+                            results['misconfigured_systems'] or 
+                            total_forwarded > 0 or 
+                            results['phishing'] > 0 or 
+                            results['security_scanned'] > 0)
             
-            # if results.get('countries'):
-            #     report_lines.extend(["\nCountry Summary:"])
-            #     sorted_countries = sorted(
-            #         results['countries'].items(),
-            #         key=lambda x: x[1],
-            #         reverse=True
-            #     )[:4]  # Get top 4 countries
+            if has_auth_results:
+                report_lines.append("")  # Blank line before authentication results
+                report_lines.append("Authentication Results:")
                 
-            #     if sorted_countries:
-            #         main_country = sorted_countries[0][0]
-            #         other_countries = [country for country, _ in sorted_countries[1:]]
+                # Only add Legitimate Systems section if there are legitimate systems
+                if results['legitimate_systems']:
+                    report_lines.append("- Legitimate Systems:")
+                    for system, count in results['legitimate_systems'].items():
+                        report_lines.append(f"  - {system}: {count} emails")
+                
+                # Only add Misconfigured Systems section if there are misconfigured systems
+                if results['misconfigured_systems']:
+                    report_lines.extend([
+                        "",
+                        "- Misconfigured Systems:"
+                    ])
+                    for system, count in results['misconfigured_systems'].items():
+                        report_lines.append(f"  - {system}: {count} emails (misconfigured)")
+                
+                # Only add Forwarded Emails section if there are forwarded emails
+                if total_forwarded > 0:
+                    report_lines.extend([
+                        "",
+                        "- Forwarded Emails:",
+                        f"  - {total_forwarded} emails have been forwarded. No action required."
+                    ])
                     
-            #         if other_countries:
-            #             country_list = ", and ".join([", ".join(other_countries[:-1]), other_countries[-1]] if len(other_countries) > 1 else other_countries)
-            #             report_lines.append(
-            #                 f"During last week, most of your emails originated from {main_country}, "
-            #                 f"with additional traffic detected from {country_list}."
-            #             )
-            #         else:
-            #             report_lines.append(
-            #                 f"During last week, most of your emails originated from {main_country}."
-            #             )
+                    # Only add suspicious forwards information if there are suspicious forwards
+                    if suspicious_forwards > 0:
+                        report_lines.append(
+                            f"  - {suspicious_forwards} emails were forwarded via suspicious servers. "
+                            "Closer monitoring required."
+                        )
+                
+                # Only add Phishing Attempts section if there are phishing attempts
+                if results['phishing'] > 0:
+                    report_lines.extend([
+                        "",
+                        "- Phishing Attempts:",
+                        f"  - {results['phishing']} phishing emails pretending to come from @{domain} email addresses. "
+                        "No action is required due to the enforced policies on the server. Phish emails were blocked and never delivered."
+                    ])
+                
+                # Only add Security Gateway section if there are security scanned emails
+                if results['security_scanned'] > 0:
+                    report_lines.extend([
+                        "",
+                        "- Security Gateway:",
+                        f"  - {results['security_scanned']} emails were scanned by spam filters. "
+                        "No further action needed."
+                    ])
             
             report_lines.extend(["", "-" * 80, ""])
         
