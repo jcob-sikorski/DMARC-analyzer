@@ -322,6 +322,10 @@ class DMARCAnalyzer:
         
         hostname_lower = hostname.lower()
         
+        if ip in ['167.89.111.48', '149.72.215.113', '149.72.215.122']:
+            logger.info(f"Sender {ip} ({hostname}) matches known Follow Up Boss IPs - categorizing as legitimate")
+            return 'legitimate', 'Follow Up Boss'
+        
         # Enhanced SendGrid Detection Rules
         if hasattr(self, 'current_domain') and self.current_domain:
             current_domain_lower = self.current_domain.lower()
